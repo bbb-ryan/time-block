@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Time Block — Video to 3D</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/98.css@0.1.21/dist/98.css" />
+<link rel="stylesheet" href="style.css" />
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+  }
+}
+</script>
+</head>
+<body>
+  <div id="desktop">
+    <div class="window" id="panelWindow">
+      <div class="title-bar">
+        <div class="title-bar-text">Time Block</div>
+        <div class="title-bar-controls">
+          <button aria-label="Minimize" id="collapseSidebarBtn" title="Collapse sidebar"></button>
+          <button aria-label="Maximize" id="expandSidebarBtn" title="Expand sidebar"></button>
+          <button aria-label="Close" id="closeSidebarBtn" title="Collapse sidebar"></button>
+        </div>
+      </div>
+      <div class="window-body" id="panel">
+        <fieldset>
+          <legend>Source</legend>
+          <div class="field-row">
+            <input type="file" id="fileInput" accept="video/*,.mp4,.mov,.webm,.m4v,.avi,.mkv,.ogv" />
+          </div>
+          <p id="fileLabelText" class="hint">No file chosen.</p>
+        </fieldset>
+
+        <fieldset id="buildGroup">
+          <legend>Build</legend>
+          <div class="field-row-stacked">
+            <div class="val-row">
+              <label for="frameCountVal">Frames</label>
+              <input type="number" class="val" id="frameCountVal" min="20" max="400" step="1" value="80" />
+            </div>
+            <input type="range" id="frameCount" min="20" max="400" step="1" value="80" />
+          </div>
+          <div class="field-row-stacked">
+            <div class="val-row">
+              <label for="sampleWidthVal">Sample width (px)</label>
+              <input type="number" class="val" id="sampleWidthVal" min="80" max="1080" step="10" value="240" />
+            </div>
+            <input type="range" id="sampleWidth" min="80" max="1080" step="10" value="240" />
+          </div>
+          <div class="field-row">
+            <button id="buildBtn" disabled>Build block</button>
+          </div>
+          <div id="progressWrap" class="hidden field-row-stacked">
+            <div class="progress-indicator" id="progressBar">
+              <span class="progress-indicator-bar" id="progressFill" style="width: 0%"></span>
+            </div>
+            <span id="progressLabel">Extracting frames&hellip; 0 / 0</span>
+          </div>
+        </fieldset>
+
+        <fieldset id="viewGroup" disabled>
+          <legend>View</legend>
+          <div class="field-row-stacked">
+            <div class="val-row">
+              <label for="spacingVal">Depth</label>
+              <input type="number" class="val" id="spacingVal" min="0.1" max="4" step="0.05" value="1.0" />
+            </div>
+            <input type="range" id="spacing" min="0.1" max="4" step="0.05" value="1.0" />
+          </div>
+          <div class="field-row-stacked">
+            <div class="val-row">
+              <label for="ghostOpacityVal">Ghost opacity</label>
+              <input type="number" class="val" id="ghostOpacityVal" min="0.02" max="1" step="0.01" value="0.15" />
+            </div>
+            <input type="range" id="ghostOpacity" min="0.02" max="1" step="0.01" value="0.15" />
+          </div>
+          <div class="field-row-stacked">
+            <div class="val-row">
+              <label for="nowPosVal">Now</label>
+              <input type="number" class="val" id="nowPosVal" min="0" max="1" step="0.01" value="0" />
+              <span class="help" tabindex="0" data-tip="Scrubs what's elapsed: frames before &quot;Now&quot; are ghosted, frames from &quot;Now&quot; on are solid.">?</span>
+            </div>
+            <input type="range" id="nowPos" min="0" max="1" step="0.01" value="0" />
+          </div>
+
+          <div class="field-row">
+            <input type="checkbox" id="autoPlay" />
+            <label for="autoPlay">Autoplay</label>
+          </div>
+
+          <div class="field-row">
+            <input type="checkbox" id="ghostOnlyCurrent" />
+            <label for="ghostOnlyCurrent">Ghost all but current frame</label>
+            <span class="help" tabindex="0" data-tip="Instead of a before/after split, only the single frame at &quot;Now&quot; stays solid — everything else, past or future, ghosts.">?</span>
+          </div>
+
+          <div class="field-row">
+            <input type="checkbox" id="solidSides" />
+            <label for="solidSides">Solid sides (fill to next frame)</label>
+          </div>
+          <div class="field-row">
+            <input type="checkbox" id="autoRotate" />
+            <label for="autoRotate">Auto-rotate</label>
+          </div>
+          <div class="field-row">
+            <input type="checkbox" id="showBox" checked />
+            <label for="showBox">Show outline</label>
+          </div>
+
+          <div class="field-row-stacked">
+            <div class="val-row">
+              <label for="zoomVal">Zoom</label>
+              <input type="number" class="val" id="zoomVal" min="0.5" max="10" step="0.01" value="3" />
+            </div>
+            <input type="range" id="zoom" min="0.5" max="10" step="0.01" value="3" />
+          </div>
+          <div class="field-row">
+            <button id="resetCamBtn">Reset camera</button>
+          </div>
+        </fieldset>
+
+        <fieldset id="sliceGroup" disabled>
+          <legend>
+            Slice
+            <span class="help" tabindex="0" data-tip="An independent cutaway — its own position and angle, unrelated to Now.">?</span>
+          </legend>
+
+          <div class="field-row-stacked">
+            <div class="val-row">
+              <label for="slicePosVal">Position</label>
+              <input type="number" class="val" id="slicePosVal" min="-1" max="1" step="0.01" value="0" />
+            </div>
+            <input type="range" id="slicePos" min="-1" max="1" step="0.01" value="0" />
+          </div>
+          <div class="field-row-stacked">
+            <div class="val-row">
+              <label for="tiltXVal">Cut angle X</label>
+              <input type="number" class="val" id="tiltXVal" min="-90" max="90" step="1" value="0" />
+              <span class="unit">&deg;</span>
+            </div>
+            <input type="range" id="tiltX" min="-90" max="90" step="1" value="0" />
+          </div>
+          <div class="field-row-stacked">
+            <div class="val-row">
+              <label for="tiltYVal">Cut angle Y</label>
+              <input type="number" class="val" id="tiltYVal" min="-90" max="90" step="1" value="0" />
+              <span class="unit">&deg;</span>
+            </div>
+            <input type="range" id="tiltY" min="-90" max="90" step="1" value="0" />
+          </div>
+
+          <div class="field-row presets">
+            <button data-preset="horizontal">Horizontal</button>
+            <button data-preset="vertical">Vertical</button>
+            <button data-preset="diagonal">Diagonal</button>
+          </div>
+
+          <div class="field-row">
+            <input type="checkbox" id="sliceEnabled" />
+            <label for="sliceEnabled">Enable slice</label>
+          </div>
+        </fieldset>
+
+        <fieldset>
+          <legend>Export</legend>
+          <div class="field-row">
+            <button id="exportBtn" disabled>Export PNG</button>
+          </div>
+        </fieldset>
+      </div>
+      <div class="status-bar">
+        <p class="status-bar-field" id="hint">Pick a short video (a few seconds works best), then click Build block.</p>
+      </div>
+    </div>
+
+    <div class="window" id="stageWindow">
+      <div class="title-bar">
+        <div class="title-bar-text">Viewport</div>
+        <div class="title-bar-controls">
+          <button aria-label="Minimize"></button>
+          <button aria-label="Maximize"></button>
+          <button aria-label="Close"></button>
+        </div>
+      </div>
+      <div class="window-body" id="stageBody">
+        <main id="stage">
+          <canvas id="canvas"></canvas>
+          <div id="emptyState">
+            <p>No block yet — load a video and click <strong>Build block</strong>.</p>
+          </div>
+        </main>
+      </div>
+    </div>
+  </div>
+
+  <video id="sourceVideo" muted playsinline preload="auto" style="display:none"></video>
+
+  <script type="module" src="app.js"></script>
+</body>
+</html>

@@ -1,0 +1,263 @@
+html, body {
+  margin: 0;
+  height: 100%;
+  background: #008080;
+}
+
+#desktop {
+  display: flex;
+  gap: 10px;
+  height: 100vh;
+  width: 100vw;
+  box-sizing: border-box;
+  padding: 10px;
+  overflow: hidden;
+}
+
+#panelWindow {
+  width: 340px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  max-height: 100%;
+}
+
+#panel {
+  overflow-y: auto;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+#panel fieldset {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+/* Chrome's UA stylesheet grays out all descendant text of a disabled
+   fieldset (not just form controls) via inherited `color`; other engines
+   don't all agree. Set it explicitly so every browser renders the same,
+   rather than depending on that inconsistency. Elements with their own
+   color (.val, .unit, .help) are unaffected — inheritance only fills in
+   where nothing more specific is set. */
+#panel fieldset[disabled] {
+  color: grey;
+}
+
+.presets {
+  gap: 6px !important;
+}
+
+.presets button {
+  min-width: 0;
+  flex: 1;
+  padding: 0 4px;
+}
+
+#progressWrap.hidden {
+  display: none;
+}
+
+/* Label and its editable value as separate siblings (not label-wraps-input)
+   so the click/hover target is only ever the small number field, never the
+   whole row. */
+.val-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.val-row label {
+  flex: 1;
+}
+
+.unit {
+  color: #000080;
+  font-weight: bold;
+  margin-left: -2px;
+}
+
+input.val {
+  color: #000080;
+  font-weight: bold;
+  width: 4em;
+  flex: 0 0 auto;
+  border: none;
+  background: transparent;
+  box-shadow: none;
+  height: auto;
+  padding: 0 2px;
+  font-family: inherit;
+  font-size: inherit;
+  text-align: left;
+}
+
+input.val:hover,
+input.val:focus {
+  background: #fff;
+  box-shadow: inset -1px -1px #fff, inset 1px 1px grey, inset -2px -2px #dfdfdf, inset 2px 2px #0a0a0a;
+  outline: none;
+}
+
+/* Native spinner arrows fight the compact inline layout — the field is
+   still a real number input (type, select-all, arrow keys all work). */
+input.val::-webkit-outer-spin-button,
+input.val::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+input.val {
+  -moz-appearance: textfield;
+}
+
+/* 98.css only sizes the ::-webkit-slider-runnable-track pseudo-element
+   (2px), leaving the real input element — and its actual click target —
+   just as thin. Give the input itself a proper hit area; the thumb's
+   translateY offset already centers it within this. */
+input[type="range"] {
+  cursor: pointer;
+  height: 20px;
+}
+
+.hint {
+  margin: 0;
+  font-size: 11px;
+}
+
+/* Compact "?" affordance replacing block explanatory text — tooltip styled
+   after the classic Windows hover-tip (pale yellow, black hairline). */
+.help {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 13px;
+  height: 13px;
+  border-radius: 50%;
+  background: #000080;
+  color: #fff;
+  font-size: 9px;
+  font-weight: bold;
+  font-family: inherit;
+  cursor: help;
+  position: relative;
+  user-select: none;
+  flex: 0 0 auto;
+}
+
+.help::after {
+  content: attr(data-tip);
+  /* fixed (not absolute) so the hidden tooltip never inflates an ancestor's
+     scrollWidth — position is computed in JS from the icon's real rect. */
+  position: fixed;
+  top: var(--tip-top, -999px);
+  left: var(--tip-left, -999px);
+  width: 210px;
+  background: #ffffe1;
+  color: #000;
+  border: 1px solid #000;
+  padding: 5px 7px;
+  font-size: 11px;
+  font-weight: normal;
+  line-height: 1.4;
+  box-shadow: 2px 2px 4px rgba(0, 0, 0, 0.3);
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transition: opacity 0.1s;
+  z-index: 20;
+}
+
+.help:hover::after,
+.help:focus::after {
+  opacity: 1;
+  visibility: visible;
+}
+
+legend .help {
+  text-transform: none;
+  letter-spacing: normal;
+  vertical-align: middle;
+}
+
+/* Sidebar collapse (wired to the Win98 Minimize/Maximize title-bar buttons) */
+#panelWindow.collapsed {
+  width: auto;
+}
+
+#panelWindow.collapsed #panel,
+#panelWindow.collapsed .status-bar {
+  display: none;
+}
+
+#panelWindow.collapsed .title-bar-text {
+  display: none;
+}
+
+#panelWindow:not(.collapsed) #expandSidebarBtn {
+  display: none;
+}
+
+#panelWindow.collapsed #collapseSidebarBtn {
+  display: none;
+}
+
+#stageWindow {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+#stageBody {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  margin: 8px;
+}
+
+/* min-*: 0 breaks a real resize feedback loop — without it, a flex item's
+   default min-height/min-width:auto lets the <canvas> inside dictate this
+   box's size via its width/height ATTRIBUTES (which the renderer sets from
+   this box's own measured size), so each resize compounds: box grows →
+   canvas attrs grow to match → box grows again to fit that, unbounded.
+   overflow:hidden is a second guard against the same intrinsic-size leak. */
+#stage {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  background: #000;
+  box-shadow: inset -1px -1px #fff, inset 1px 1px grey, inset -2px -2px #dfdfdf, inset 2px 2px #0a0a0a;
+}
+
+#canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+#emptyState {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+  text-align: center;
+  padding: 0 40px;
+}
+
+#emptyState p {
+  color: #aaa;
+  font-size: 13px;
+  max-width: 320px;
+}
+
+#emptyState.hidden {
+  display: none;
+}
