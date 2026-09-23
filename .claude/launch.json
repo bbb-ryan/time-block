@@ -4,8 +4,8 @@
     {
       "name": "time-block-server",
       "runtimeExecutable": "python3",
-      "runtimeArgs": ["-m", "http.server", "8743"],
-      "port": 8743
+      "runtimeArgs": ["serve.py", "8744"],
+      "port": 8744
     }
   ]
 }

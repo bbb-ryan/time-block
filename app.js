@@ -1,5 +1,7 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { FilesetResolver, ImageSegmenter } from '@mediapipe/tasks-vision';
+import { alphamask as imglyAlphamask, preload as imglyPreload } from '@imgly/background-removal';
 
 // ---------- DOM ----------
 const fileInput = document.getElementById('fileInput');
@@ -23,8 +25,10 @@ const autoRotateCheckbox = document.getElementById('autoRotate');
 const showBoxCheckbox = document.getElementById('showBox');
 const resetCamBtn = document.getElementById('resetCamBtn');
 const sliceEnabledCheckbox = document.getElementById('sliceEnabled');
+const sliceFlippedCheckbox = document.getElementById('sliceFlipped');
 const solidSidesCheckbox = document.getElementById('solidSides');
 const ghostOnlyCurrentCheckbox = document.getElementById('ghostOnlyCurrent');
+const cutoutSolidCheckbox = document.getElementById('cutoutSolid');
 const zoomSlider = document.getElementById('zoom');
 const zoomNumEl = document.getElementById('zoomVal');
 const autoPlayCheckbox = document.getElementById('autoPlay');
@@ -32,6 +36,20 @@ const panelWindow = document.getElementById('panelWindow');
 const collapseSidebarBtn = document.getElementById('collapseSidebarBtn');
 const expandSidebarBtn = document.getElementById('expandSidebarBtn');
 const closeSidebarBtn = document.getElementById('closeSidebarBtn');
+
+const bgRemoveEnabledCheckbox = document.getElementById('bgRemoveEnabled');
+const bgModelSelect = document.getElementById('bgModel');
+const chromaKeyControls = document.getElementById('chromaKeyControls');
+const chromaKeyColorInput = document.getElementById('chromaKeyColor');
+const bgRemovalWindow = document.getElementById('bgRemovalWindow');
+const bgWindowCloseBtn = document.getElementById('bgWindowCloseBtn');
+const bgSkipBtn = document.getElementById('bgSkipBtn');
+const bgConfirmBtn = document.getElementById('bgConfirmBtn');
+const bgProgressWrap = document.getElementById('bgProgressWrap');
+const bgProgressFill = document.getElementById('bgProgressFill');
+const bgProgressLabel = document.getElementById('bgProgressLabel');
+const bgPreviewWrap = document.getElementById('bgPreviewWrap');
+const bgPreviewCanvas = document.getElementById('bgPreviewCanvas');
 
 // ---------- three.js setup ----------
 const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, preserveDrawingBuffer: true });
@@ -48,6 +66,13 @@ const controls = new OrbitControls(camera, renderer.domElement);
 controls.enableDamping = true;
 controls.dampingFactor = 0.08;
 controls.autoRotateSpeed = 1.6;
+// OrbitControls scales each wheel event by
+// 0.95 ** (zoomSpeed * |deltaY| / (100 * devicePixelRatio)) — a trackpad's
+// per-event deltaY is only a few px (vs. a mouse wheel's ~100), and on a
+// 2x Retina display that's divided by 200, so at the default zoomSpeed=1
+// each trackpad tick barely moves the camera at all. Raising zoomSpeed is
+// the direct fix (same formula, bigger multiplier) rather than fighting it.
+controls.zoomSpeed = 5;
 
 // Half-diagonal of the block's bounding box. Zoom limits, clip planes, and
 // the default camera distance are all derived from this, so a tiny block
@@ -327,6 +352,315 @@ async function extractFrames(videoEl, count, maxWidth, onProgress) {
   return frames;
 }
 
+// ---------- background removal (ML segmentation) ----------
+// Two selectable models, dispatched by `bgModelSelect.value`. Both funnel
+// into the same per-frame contract — { bgMask: Float32Array(0..1), bgMaskW,
+// bgMaskH } cached on each frame — so bakeBackgroundAlpha/updateBgPreview/
+// finalizeBackgroundRemoval below don't care which one ran.
+
+// -- Model: MediaPipe selfie_segmenter (fast, tuned for real people) --
+// Lazily created once, on first use — avoids downloading the model/WASM
+// runtime for anyone who never checks "Remove background".
+let segmenterPromise = null;
+function getSegmenter() {
+  if (!segmenterPromise) {
+    segmenterPromise = (async () => {
+      const vision = await FilesetResolver.forVisionTasks(
+        'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@1.0.1/wasm'
+      );
+      return ImageSegmenter.createFromOptions(vision, {
+        baseOptions: {
+          modelAssetPath:
+            'https://storage.googleapis.com/mediapipe-models/image_segmenter/selfie_segmenter/float16/latest/selfie_segmenter.tflite',
+        },
+        runningMode: 'IMAGE',
+        outputCategoryMask: false,
+        outputConfidenceMasks: true,
+      });
+    })();
+  }
+  return segmenterPromise;
+}
+
+// Runs inference on every already-extracted frame and caches a foreground-
+// confidence mask per frame. The mask array MediaPipe hands back is only
+// valid inside the result callback (it's owned by the underlying WASM
+// task), so it's copied out immediately.
+async function computeBackgroundMasksMediaPipe(frames, onProgress) {
+  const segmenter = await getSegmenter();
+  for (let i = 0; i < frames.length; i++) {
+    const sourceCanvas = frames[i].texture.image;
+    await new Promise((resolve, reject) => {
+      try {
+        segmenter.segment(sourceCanvas, (result) => {
+          const mask = result.confidenceMasks[0];
+          frames[i].bgMask = mask.getAsFloat32Array();
+          frames[i].bgMaskW = mask.width;
+          frames[i].bgMaskH = mask.height;
+          resolve();
+        });
+      } catch (err) {
+        reject(err);
+      }
+    });
+    onProgress(i + 1, frames.length);
+    // Same rationale as extractFrames' yield below: setTimeout survives a
+    // backgrounded tab, requestAnimationFrame does not.
+    await new Promise((r) => setTimeout(r, 0));
+  }
+}
+
+// -- Model: @imgly/background-removal (ISNet, class-agnostic salient-
+// object segmentation — slower, but not limited to photographic people) --
+// Stable object reference: the library memoizes its model session by
+// JSON.stringify(config), so reusing this same object across every frame
+// (and across builds) means the model downloads/initializes only once.
+const IMGLY_CONFIG = { model: 'isnet_fp16' };
+
+// alphamask() returns a Blob: an image the same size as the input, RGB
+// forced to white and alpha set to the mask confidence (0-255) — decoding
+// it and reading only the alpha channel gives the same Float32Array(0..1)
+// shape the MediaPipe path produces.
+async function blobAlphaToFloatArray(blob, w, h) {
+  const bitmap = await createImageBitmap(blob);
+  const c = document.createElement('canvas');
+  c.width = w;
+  c.height = h;
+  const cctx = c.getContext('2d');
+  cctx.drawImage(bitmap, 0, 0, w, h);
+  bitmap.close();
+  const data = cctx.getImageData(0, 0, w, h).data;
+  const arr = new Float32Array(w * h);
+  for (let i = 0; i < arr.length; i++) arr[i] = data[i * 4 + 3] / 255;
+  return arr;
+}
+
+function canvasToPngBlob(canvas) {
+  return new Promise((resolve) => canvas.toBlob(resolve, 'image/png'));
+}
+
+async function computeBackgroundMasksImgly(frames, onProgress) {
+  await imglyPreload(IMGLY_CONFIG);
+  for (let i = 0; i < frames.length; i++) {
+    const sourceCanvas = frames[i].texture.image;
+    // The library declares ImageData as an accepted ImageSource in its
+    // type, but imageSourceToImageData() only actually converts
+    // string/URL/ArrayBuffer/Uint8Array/Blob at runtime — anything else
+    // (including ImageData or a raw canvas) passes through unconverted and
+    // later fails destructuring `.shape`. A PNG Blob is a path that's
+    // actually implemented (imageDecode -> createImageBitmap).
+    const blob = await canvasToPngBlob(sourceCanvas);
+    const maskBlob = await imglyAlphamask(blob, IMGLY_CONFIG);
+    frames[i].bgMask = await blobAlphaToFloatArray(maskBlob, sourceCanvas.width, sourceCanvas.height);
+    frames[i].bgMaskW = sourceCanvas.width;
+    frames[i].bgMaskH = sourceCanvas.height;
+    onProgress(i + 1, frames.length);
+    await new Promise((r) => setTimeout(r, 0));
+  }
+}
+
+// -- Model: chroma key (deterministic color-distance, no ML at all) --
+// The only one of the three that's genuinely fast at any frame count — no
+// model download, no inference — so it fits the same Phase 1/Phase 2 shape
+// as the ML models even though nothing here is actually slow.
+function hexToRgb(hex) {
+  const v = parseInt(hex.slice(1), 16);
+  return { r: (v >> 16) & 255, g: (v >> 8) & 255, b: v & 255 };
+}
+
+function smoothstep(t) {
+  t = Math.min(1, Math.max(0, t));
+  return t * t * (3 - 2 * t);
+}
+
+async function computeBackgroundMasksChromaKey(frames, onProgress, keyColorHex, tolerancePercent) {
+  const { r: kr, g: kg, b: kb } = hexToRgb(keyColorHex);
+  // Max possible per-pixel RGB Euclidean distance is sqrt(3 * 255^2); the
+  // tolerance slider (1-100) is a percentage of that. `feather` widens a
+  // soft transition band around the threshold instead of a hard cutoff,
+  // so edges don't come out jagged.
+  const maxDist = Math.sqrt(3 * 255 * 255);
+  const threshold = (tolerancePercent / 100) * maxDist;
+  const feather = Math.max(4, threshold * 0.4);
+  for (let i = 0; i < frames.length; i++) {
+    const sourceCanvas = frames[i].texture.image;
+    const w = sourceCanvas.width;
+    const h = sourceCanvas.height;
+    const data = sourceCanvas.getContext('2d').getImageData(0, 0, w, h).data;
+    const mask = new Float32Array(w * h);
+    for (let p = 0; p < mask.length; p++) {
+      const idx = p * 4;
+      const dr = data[idx] - kr;
+      const dg = data[idx + 1] - kg;
+      const db = data[idx + 2] - kb;
+      const dist = Math.sqrt(dr * dr + dg * dg + db * db);
+      // Close to the key color (dist < threshold-feather) -> background
+      // (mask -> 0). Far from it (dist > threshold+feather) -> foreground
+      // (mask -> 1), with a smoothstep ramp in between.
+      mask[p] = smoothstep((dist - (threshold - feather)) / (2 * feather));
+    }
+    frames[i].bgMask = mask;
+    frames[i].bgMaskW = w;
+    frames[i].bgMaskH = h;
+    onProgress(i + 1, frames.length);
+    await new Promise((r) => setTimeout(r, 0));
+  }
+}
+
+async function computeBackgroundMasks(frames, onProgress) {
+  const model = bgModelSelect.value;
+  if (model === 'imgly') {
+    await computeBackgroundMasksImgly(frames, onProgress);
+  } else if (model === 'chromakey') {
+    await computeBackgroundMasksChromaKey(
+      frames,
+      onProgress,
+      chromaKeyColorInput.value,
+      parseFloat(chromaToleranceSlider.value)
+    );
+  } else {
+    await computeBackgroundMasksMediaPipe(frames, onProgress);
+  }
+}
+
+// Phase 2 (cheap, re-run freely): copies `sourceCanvas` and sets each
+// pixel's alpha from its cached mask confidence, blended toward
+// `bgOpacity` for background pixels. Foreground stays fully opaque
+// regardless of the slider; background fades continuously with it.
+function bakeBackgroundAlpha(sourceCanvas, mask, maskW, maskH, bgOpacity) {
+  const w = sourceCanvas.width;
+  const h = sourceCanvas.height;
+  const out = document.createElement('canvas');
+  out.width = w;
+  out.height = h;
+  const ctx = out.getContext('2d');
+  ctx.drawImage(sourceCanvas, 0, 0, w, h);
+  const imgData = ctx.getImageData(0, 0, w, h);
+  const data = imgData.data;
+  // Mask resolution isn't guaranteed to match the sample canvas (the model
+  // has its own fixed input size), so sample it with nearest-neighbor.
+  const sx = maskW / w;
+  const sy = maskH / h;
+  for (let y = 0; y < h; y++) {
+    const my = Math.min(maskH - 1, Math.floor(y * sy));
+    const rowOff = my * maskW;
+    for (let x = 0; x < w; x++) {
+      const mx = Math.min(maskW - 1, Math.floor(x * sx));
+      const fg = mask[rowOff + mx];
+      const alpha = fg + (1 - fg) * bgOpacity;
+      data[(y * w + x) * 4 + 3] = Math.round(alpha * 255);
+    }
+  }
+  ctx.putImageData(imgData, 0, 0);
+  return out;
+}
+
+let bgPreviewFrameIndex = 0;
+function updateBgPreview() {
+  const frame = frameData[bgPreviewFrameIndex];
+  if (!frame || !frame.bgMask) return;
+  const bgOpacity = parseFloat(bgOpacitySlider.value);
+  const baked = bakeBackgroundAlpha(frame.texture.image, frame.bgMask, frame.bgMaskW, frame.bgMaskH, bgOpacity);
+  bgPreviewCanvas.width = baked.width;
+  bgPreviewCanvas.height = baked.height;
+  const pctx = bgPreviewCanvas.getContext('2d');
+  // Mid-gray backdrop so a faded/transparent background is actually visible
+  // against the preview canvas, not indistinguishable from black.
+  pctx.fillStyle = '#333';
+  pctx.fillRect(0, 0, baked.width, baked.height);
+  pctx.drawImage(baked, 0, 0);
+}
+
+// Bakes the finalized opacity into every frame and swaps each frame's
+// texture/edge-strip sources for the masked versions — same disposal +
+// recreation pattern the build handler already uses when frameData changes.
+function finalizeBackgroundRemoval(bgOpacity) {
+  frameData.forEach((frame) => {
+    const baked = bakeBackgroundAlpha(frame.texture.image, frame.bgMask, frame.bgMaskW, frame.bgMaskH, bgOpacity);
+    frame.texture.dispose();
+    Object.values(frame.edges).forEach((t) => t.dispose());
+    const tex = new THREE.CanvasTexture(baked);
+    tex.colorSpace = THREE.SRGBColorSpace;
+    tex.needsUpdate = true;
+    frame.texture = tex;
+    frame.edges = {
+      right: edgeStripTexture(baked, 'right'),
+      left: edgeStripTexture(baked, 'left'),
+      top: edgeStripTexture(baked, 'top'),
+      bottom: edgeStripTexture(baked, 'bottom'),
+    };
+  });
+}
+
+function showBgRemovalWindow() {
+  bgRemovalWindow.classList.remove('hidden');
+  bgProgressWrap.classList.remove('hidden');
+  bgPreviewWrap.classList.add('hidden');
+  bgConfirmBtn.classList.add('hidden');
+  bgConfirmBtn.disabled = true;
+  bgProgressFill.style.width = '0%';
+  bgProgressLabel.textContent = `Analyzing frames… 0 / ${frameData.length}`;
+}
+
+function hideBgRemovalWindow() {
+  bgRemovalWindow.classList.add('hidden');
+}
+
+// Runs entirely between extraction and buildBlock(): shows the modal,
+// computes masks (Phase 1) with its own progress bar, previews the middle
+// frame live as the opacity slider moves (Phase 2, single frame), then
+// waits for the user to confirm or skip before the 3D object is built.
+async function runBackgroundRemovalFlow() {
+  showBgRemovalWindow();
+  hint.textContent = 'Loading segmentation model…';
+
+  try {
+    await computeBackgroundMasks(frameData, (i, n) => {
+      bgProgressFill.style.width = `${(i / n) * 100}%`;
+      bgProgressLabel.textContent = `Analyzing frames… ${i} / ${n}`;
+    });
+  } catch (err) {
+    console.error(err);
+    hint.textContent = 'Background removal failed — see console for details. Building without it.';
+    hideBgRemovalWindow();
+    buildBlock();
+    return;
+  }
+
+  bgProgressWrap.classList.add('hidden');
+  bgPreviewWrap.classList.remove('hidden');
+  bgConfirmBtn.classList.remove('hidden');
+  bgConfirmBtn.disabled = false;
+  bgPreviewFrameIndex = Math.floor(frameData.length / 2);
+  updateBgPreview();
+
+  const choice = await new Promise((resolve) => {
+    const onConfirm = () => {
+      cleanup();
+      resolve('confirm');
+    };
+    const onSkip = () => {
+      cleanup();
+      resolve('skip');
+    };
+    function cleanup() {
+      bgConfirmBtn.removeEventListener('click', onConfirm);
+      bgSkipBtn.removeEventListener('click', onSkip);
+      bgWindowCloseBtn.removeEventListener('click', onSkip);
+    }
+    bgConfirmBtn.addEventListener('click', onConfirm);
+    bgSkipBtn.addEventListener('click', onSkip);
+    bgWindowCloseBtn.addEventListener('click', onSkip);
+  });
+
+  hideBgRemovalWindow();
+  if (choice === 'confirm') {
+    finalizeBackgroundRemoval(parseFloat(bgOpacitySlider.value));
+  }
+  buildBlock();
+  hint.textContent = 'Drag to orbit, use the Zoom bar or scroll to zoom. Drag "Now" in View to scrub elapsed vs. solid.';
+}
+
 function rebuildBoxHelper(w, h, d) {
   if (boxHelper) {
     scene.remove(boxHelper);
@@ -369,8 +703,19 @@ function updateClipPlane() {
   normal.applyEuler(euler).normalize();
 
   const offset = posV * boxExtentAlong(normal);
+  let constant = -offset;
+
+  // Negating BOTH normal and constant keeps the plane in exactly the same
+  // place (same solution set for normal·p + constant = 0) but flips which
+  // half satisfies "kept" (distance >= 0) — the cut line doesn't move,
+  // just which side survives it.
+  if (sliceFlippedCheckbox.checked) {
+    normal.negate();
+    constant = -constant;
+  }
+
   clipPlane.normal.copy(normal);
-  clipPlane.constant = -offset;
+  clipPlane.constant = constant;
   updateSliceCaps();
 }
 
@@ -486,12 +831,16 @@ function updateSliceCaps() {
 
     const opacity = frameOpacityAt(mesh, i, n);
     const solid = opacity >= 0.999;
+    // Same blendAlpha reasoning as updateGhostOpacity() — caps are flat
+    // single polygons (not boxes), so DoubleSide is always safe here
+    // regardless of blendAlpha; only transparent/depthWrite need to follow.
+    const blendAlpha = !solid || cutoutSolidCheckbox.checked;
     const mat = new THREE.MeshBasicMaterial({
       map: frameData[i].texture,
       side: THREE.DoubleSide,
-      transparent: !solid,
+      transparent: blendAlpha,
       opacity,
-      depthWrite: solid,
+      depthWrite: !blendAlpha,
     });
     group.add(new THREE.Mesh(geo, mat));
   });
@@ -523,13 +872,30 @@ function frameOpacityAt(mesh, index, n) {
 
 function updateGhostOpacity() {
   const n = frameMeshes.length;
+  const cutoutSolid = cutoutSolidCheckbox.checked;
   frameMeshes.forEach((mesh, i) => {
     const opacity = frameOpacityAt(mesh, i, n);
     const solid = opacity >= 0.999;
+    // Background removal only ever writes the texture's ALPHA channel
+    // (bakeBackgroundAlpha leaves RGB untouched) — a material rendered
+    // with transparent:false ignores that alpha entirely and shows the
+    // full original frame. `cutoutSolid` opts a "solid" frame into the
+    // same alpha-aware treatment ghosted frames already get, so its
+    // cutout actually shows (on front/back AND the 4 side faces, since
+    // they share this same materials loop). Off (default), blendAlpha
+    // reduces to exactly !solid — byte-for-byte today's behavior.
+    const blendAlpha = !solid || cutoutSolid;
     meshMaterials(mesh).forEach((m) => {
       m.opacity = opacity;
-      m.transparent = !solid;
-      m.depthWrite = solid;
+      m.transparent = blendAlpha;
+      m.depthWrite = !blendAlpha;
+      // Blended (transparent) layers stay FrontSide — DoubleSide would draw
+      // both the near AND far face of every stacked box, doubling the
+      // alpha blend. Fully-opaque layers don't have that problem, and
+      // DoubleSide is what keeps them visible after flipping the slice
+      // plane exposes whichever face happens to be back-facing from the
+      // current camera angle (a plain culling artifact, not a clip bug).
+      m.side = blendAlpha ? THREE.FrontSide : THREE.DoubleSide;
       m.needsUpdate = true;
     });
   });
@@ -616,6 +982,19 @@ function buildBlock() {
 // ---------- range bindings ----------
 bindRange('frameCount', 'frameCountVal');
 bindRange('sampleWidth', 'sampleWidthVal');
+
+const bgOpacitySlider = bindRange('bgOpacity', 'bgOpacityVal', {
+  decimals: 2,
+  onInput: () => updateBgPreview(),
+});
+
+const chromaToleranceSlider = bindRange('chromaTolerance', 'chromaToleranceVal');
+
+function updateChromaKeyControlsVisibility() {
+  chromaKeyControls.classList.toggle('hidden', bgModelSelect.value !== 'chromakey');
+}
+bgModelSelect.addEventListener('change', updateChromaKeyControlsVisibility);
+updateChromaKeyControlsVisibility();
 
 const spacingSlider = bindRange('spacing', 'spacingVal', {
   decimals: 2,
@@ -704,8 +1083,13 @@ buildBtn.addEventListener('click', async () => {
       Object.values(f.edges).forEach((t) => t.dispose());
     });
     frameData = newFrameData;
-    buildBlock();
-    hint.textContent = 'Drag to orbit, use the Zoom bar or scroll to zoom. Drag "Now" in View to scrub elapsed vs. solid.';
+
+    if (bgRemoveEnabledCheckbox.checked) {
+      await runBackgroundRemovalFlow();
+    } else {
+      buildBlock();
+      hint.textContent = 'Drag to orbit, use the Zoom bar or scroll to zoom. Drag "Now" in View to scrub elapsed vs. solid.';
+    }
   } catch (err) {
     console.error(err);
     hint.textContent = 'Something went wrong extracting frames — see console for details.';
@@ -729,6 +1113,10 @@ solidSidesCheckbox.addEventListener('change', () => {
 });
 
 ghostOnlyCurrentCheckbox.addEventListener('change', () => {
+  if (frameMeshes.length) updateGhostOpacity();
+});
+
+cutoutSolidCheckbox.addEventListener('change', () => {
   if (frameMeshes.length) updateGhostOpacity();
 });
 
@@ -799,6 +1187,8 @@ resetCamBtn.addEventListener('click', resetCamera);
 
 sliceEnabledCheckbox.addEventListener('change', updateSliceEnabled);
 updateSliceEnabled();
+
+sliceFlippedCheckbox.addEventListener('change', updateClipPlane);
 
 document.querySelectorAll('.presets button').forEach((btn) => {
   btn.addEventListener('click', () => {
