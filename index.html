@@ -23,11 +23,10 @@
   <div id="desktop">
     <div class="window" id="panelWindow">
       <div class="title-bar">
-        <div class="title-bar-text">Time Block</div>
+        <div class="title-bar-text">Controls</div>
         <div class="title-bar-controls">
           <button aria-label="Minimize" id="collapseSidebarBtn" title="Collapse sidebar"></button>
           <button aria-label="Maximize" id="expandSidebarBtn" title="Expand sidebar"></button>
-          <button aria-label="Close" id="closeSidebarBtn" title="Collapse sidebar"></button>
         </div>
       </div>
       <div class="window-body" id="panel">
@@ -54,6 +53,19 @@
               <input type="number" class="val" id="sampleWidthVal" min="80" max="1080" step="10" value="240" />
             </div>
             <input type="range" id="sampleWidth" min="80" max="1080" step="10" value="240" />
+          </div>
+          <div class="field-row">
+            <input type="checkbox" id="pointCloudEnabled" />
+            <label for="pointCloudEnabled">Render frames as points</label>
+            <span class="help" tabindex="0" data-tip="Each frame becomes a cloud of soft round points sampled from its own pixels, instead of a solid textured plane. Stays visible even edge-on, unlike a flat plane.">?</span>
+          </div>
+          <div class="field-row-stacked">
+            <div class="val-row">
+              <label for="pointDensityVal">Point spacing (px)</label>
+              <input type="number" class="val" id="pointDensityVal" min="1" max="10" step="1" value="4" />
+              <span class="help" tabindex="0" data-tip="Sample every Nth pixel as a point. Lower = denser/more solid-looking (more points, slower); higher = sparser/more particle-like (fewer points, faster).">?</span>
+            </div>
+            <input type="range" id="pointDensity" min="1" max="10" step="1" value="4" />
           </div>
           <div class="field-row">
             <input type="checkbox" id="bgRemoveEnabled" />
@@ -127,12 +139,6 @@
             <input type="checkbox" id="ghostOnlyCurrent" />
             <label for="ghostOnlyCurrent">Ghost all but current frame</label>
             <span class="help" tabindex="0" data-tip="Instead of a before/after split, only the single frame at &quot;Now&quot; stays solid — everything else, past or future, ghosts.">?</span>
-          </div>
-
-          <div class="field-row">
-            <input type="checkbox" id="cutoutSolid" />
-            <label for="cutoutSolid">Remove background on solid frames</label>
-            <span class="help" tabindex="0" data-tip="If background was removed: solid (non-ghosted) frames normally keep their full original background for context. Turn this on to cut them out too, matching the ghosted frames — including their side faces.">?</span>
           </div>
 
           <div class="field-row">

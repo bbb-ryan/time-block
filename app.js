@@ -28,14 +28,14 @@ const sliceEnabledCheckbox = document.getElementById('sliceEnabled');
 const sliceFlippedCheckbox = document.getElementById('sliceFlipped');
 const solidSidesCheckbox = document.getElementById('solidSides');
 const ghostOnlyCurrentCheckbox = document.getElementById('ghostOnlyCurrent');
-const cutoutSolidCheckbox = document.getElementById('cutoutSolid');
 const zoomSlider = document.getElementById('zoom');
 const zoomNumEl = document.getElementById('zoomVal');
 const autoPlayCheckbox = document.getElementById('autoPlay');
 const panelWindow = document.getElementById('panelWindow');
 const collapseSidebarBtn = document.getElementById('collapseSidebarBtn');
 const expandSidebarBtn = document.getElementById('expandSidebarBtn');
-const closeSidebarBtn = document.getElementById('closeSidebarBtn');
+
+const pointCloudCheckbox = document.getElementById('pointCloudEnabled');
 
 const bgRemoveEnabledCheckbox = document.getElementById('bgRemoveEnabled');
 const bgModelSelect = document.getElementById('bgModel');
@@ -174,12 +174,40 @@ let boxHelper = null;
 let capGroup = null;
 let totalDepth = 0;
 let currentObjectURL = null;
+// Whether the frames currently in frameData have real per-pixel alpha baked
+// in (vs. uniformly opaque). Drives "remove background on solid frames"
+// automatically — no separate toggle, since it's only ever meaningful when
+// background removal actually ran, and a no-op (same look either way)
+// otherwise.
+let lastBuildHadBgRemoval = false;
 
 // Two independent planes: `ghostPlane` (View → Now) decides what's elapsed
 // and drives opacity only; `clipPlane` (Slice) is its own cutaway tool with
 // its own position/tilt and only acts when Hard cut / Enable slice is on.
 const ghostPlane = new THREE.Plane(new THREE.Vector3(0, 0, 1), 0);
 const clipPlane = new THREE.Plane(new THREE.Vector3(0, 0, 1), 0);
+
+// A small radial-gradient dot, generated once and reused as every point
+// cloud's sprite — this (not any depth/covariance math) is what gives
+// "Render frames as points" its soft, splat-like look instead of square
+// GL points.
+function makeDotSpriteTexture() {
+  const size = 32;
+  const c = document.createElement('canvas');
+  c.width = c.height = size;
+  const ctx = c.getContext('2d');
+  const r = size / 2;
+  const grad = ctx.createRadialGradient(r, r, 0, r, r, r);
+  grad.addColorStop(0, 'rgba(255,255,255,1)');
+  grad.addColorStop(0.7, 'rgba(255,255,255,0.7)');
+  grad.addColorStop(1, 'rgba(255,255,255,0)');
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, size, size);
+  const tex = new THREE.CanvasTexture(c);
+  tex.needsUpdate = true;
+  return tex;
+}
+const dotSpriteTexture = makeDotSpriteTexture();
 
 // ---------- helpers ----------
 // Pairs a range slider with an editable number input showing its value:
@@ -656,6 +684,7 @@ async function runBackgroundRemovalFlow() {
   hideBgRemovalWindow();
   if (choice === 'confirm') {
     finalizeBackgroundRemoval(parseFloat(bgOpacitySlider.value));
+    lastBuildHadBgRemoval = true;
   }
   buildBlock();
   hint.textContent = 'Drag to orbit, use the Zoom bar or scroll to zoom. Drag "Now" in View to scrub elapsed vs. solid.';
@@ -797,7 +826,9 @@ function disposeCapGroup() {
 
 function updateSliceCaps() {
   disposeCapGroup();
-  if (!sliceEnabledCheckbox.checked || !frameMeshes.length) return;
+  // Point-cloud frames have no volume to cap — clippingPlanes already cuts
+  // them cleanly (a naturally jagged edge of dots), which fits the look.
+  if (!sliceEnabledCheckbox.checked || !frameMeshes.length || pointCloudCheckbox.checked) return;
 
   const halfW = PLANE_W / 2;
   const halfH = planeH / 2;
@@ -834,7 +865,7 @@ function updateSliceCaps() {
     // Same blendAlpha reasoning as updateGhostOpacity() — caps are flat
     // single polygons (not boxes), so DoubleSide is always safe here
     // regardless of blendAlpha; only transparent/depthWrite need to follow.
-    const blendAlpha = !solid || cutoutSolidCheckbox.checked;
+    const blendAlpha = !solid || lastBuildHadBgRemoval;
     const mat = new THREE.MeshBasicMaterial({
       map: frameData[i].texture,
       side: THREE.DoubleSide,
@@ -872,19 +903,19 @@ function frameOpacityAt(mesh, index, n) {
 
 function updateGhostOpacity() {
   const n = frameMeshes.length;
-  const cutoutSolid = cutoutSolidCheckbox.checked;
   frameMeshes.forEach((mesh, i) => {
     const opacity = frameOpacityAt(mesh, i, n);
     const solid = opacity >= 0.999;
     // Background removal only ever writes the texture's ALPHA channel
     // (bakeBackgroundAlpha leaves RGB untouched) — a material rendered
     // with transparent:false ignores that alpha entirely and shows the
-    // full original frame. `cutoutSolid` opts a "solid" frame into the
-    // same alpha-aware treatment ghosted frames already get, so its
-    // cutout actually shows (on front/back AND the 4 side faces, since
-    // they share this same materials loop). Off (default), blendAlpha
-    // reduces to exactly !solid — byte-for-byte today's behavior.
-    const blendAlpha = !solid || cutoutSolid;
+    // full original frame. When the current build actually has background
+    // removal baked in, solid frames get the same alpha-aware treatment
+    // ghosted frames already get, so the cutout actually shows (on
+    // front/back AND the 4 side faces, since they share this materials
+    // loop). Without background removal, blendAlpha reduces to exactly
+    // !solid, keeping the DoubleSide flip-plane-visibility fix intact.
+    const blendAlpha = !solid || lastBuildHadBgRemoval;
     meshMaterials(mesh).forEach((m) => {
       m.opacity = opacity;
       m.transparent = blendAlpha;
@@ -924,6 +955,81 @@ function layoutBlock(spacingValue) {
   updateCameraLimits();
 }
 
+// Alternative to the box: each frame's own pixels become individual points
+// (soft round sprites, not squares) instead of a solid textured plane — no
+// depth/covariance estimation, just the frame's existing canvas resampled
+// at `stride` intervals. Background-removed pixels (alpha near 0, already
+// baked into `texture.image` by finalizeBackgroundRemoval if that ran)
+// are skipped entirely rather than rendered as faint points.
+function buildFramePoints(texture, stride, opacity0, clippingPlanes0, frameIndex) {
+  const canvas = texture.image;
+  const w = canvas.width;
+  const h = canvas.height;
+  const data = canvas.getContext('2d').getImageData(0, 0, w, h).data;
+  const halfW = PLANE_W / 2;
+  const halfH = planeH / 2;
+
+  // Every frame samples the identical (x,y) grid by default (same canvas
+  // dims, same stride), which aliases into a moiré interference pattern
+  // once ~100s of them stack densely along Z and are viewed at an angle —
+  // confirmed by A/B testing against flat-box mode at the same settings,
+  // which shows no such artifact (continuous textured faces don't have a
+  // regular sample grid to alias against). A per-frame grid-offset alone
+  // isn't enough to fix this: with a small integer stride, the offset
+  // cycles through only `stride` distinct values and repeats every few
+  // frames, so the moiré just reappears at a lower spatial frequency.
+  // Instead, jitter each individual POINT by a continuous (sub-cell)
+  // pseudo-random amount — this is the standard stochastic-sampling fix
+  // for grid aliasing. `hash01` is deterministic (seeded from frame index
+  // and pixel position), so a given build is still fully reproducible.
+  function hash01(a, b) {
+    let h = Math.imul(a ^ 0x9e3779b9, 0x85ebca6b) ^ Math.imul(b ^ 0x27d4eb2f, 0xc2b2ae35);
+    h = Math.imul(h ^ (h >>> 15), 2246822519);
+    h ^= h >>> 13;
+    return (h >>> 0) / 4294967296;
+  }
+  const cellWorldW = (PLANE_W / w) * stride;
+  const cellWorldH = (planeH / h) * stride;
+
+  const positions = [];
+  const colors = [];
+  for (let y = 0; y < h; y += stride) {
+    for (let x = 0; x < w; x += stride) {
+      const idx = (y * w + x) * 4;
+      // alpha = fg + (1-fg)*bgOpacity (see bakeBackgroundAlpha) — background
+      // pixels stay well under 50% even at a generous bgOpacity, foreground
+      // stays at 100%, so a 50% cutoff separates them regardless of the
+      // exact bgOpacity slider value used at bake time.
+      if (data[idx + 3] < 128) continue;
+      const seedA = frameIndex * 73856093 + x * 19349663;
+      const seedB = frameIndex * 83492791 + y * 2654435761;
+      const jx = (hash01(seedA, y) - 0.5) * cellWorldW;
+      const jy = (hash01(x, seedB) - 0.5) * cellWorldH;
+      positions.push((x / w) * PLANE_W - halfW + jx, halfH - (y / h) * planeH + jy, 0);
+      colors.push(data[idx] / 255, data[idx + 1] / 255, data[idx + 2] / 255);
+    }
+  }
+
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+  geo.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
+  const mat = new THREE.PointsMaterial({
+    // Sized to lightly overlap neighboring points at this density, so the
+    // cloud reads as a soft continuous surface rather than isolated dots.
+    size: (PLANE_W / (w / stride)) * 1.6,
+    sizeAttenuation: true,
+    vertexColors: true,
+    map: dotSpriteTexture,
+    transparent: true,
+    opacity: opacity0,
+    depthWrite: false,
+    alphaTest: 0.02,
+    clippingPlanes: clippingPlanes0,
+    clipShadows: false,
+  });
+  return new THREE.Points(geo, mat);
+}
+
 function buildBlock() {
   if (blockGroup) {
     scene.remove(blockGroup);
@@ -936,8 +1042,15 @@ function buildBlock() {
 
   const opacity0 = parseFloat(ghostOpacitySlider.value);
   const clippingPlanes0 = sliceEnabledCheckbox.checked ? [clipPlane] : [];
+  const asPoints = pointCloudCheckbox.checked;
+  const pointStride = parseInt(pointDensitySlider.value, 10);
 
-  frameMeshes = frameData.map(({ texture, edges }) => {
+  frameMeshes = frameData.map(({ texture, edges }, i) => {
+    if (asPoints) {
+      const points = buildFramePoints(texture, pointStride, opacity0, clippingPlanes0, i);
+      group.add(points);
+      return points;
+    }
     // A box, not DoubleSide: each face renders once (its natural winding),
     // so a stack of layers blends one surface per layer, not two — otherwise
     // ghost opacity effectively doubles (near + far face both drawing).
@@ -982,6 +1095,7 @@ function buildBlock() {
 // ---------- range bindings ----------
 bindRange('frameCount', 'frameCountVal');
 bindRange('sampleWidth', 'sampleWidthVal');
+const pointDensitySlider = bindRange('pointDensity', 'pointDensityVal');
 
 const bgOpacitySlider = bindRange('bgOpacity', 'bgOpacityVal', {
   decimals: 2,
@@ -1083,6 +1197,7 @@ buildBtn.addEventListener('click', async () => {
       Object.values(f.edges).forEach((t) => t.dispose());
     });
     frameData = newFrameData;
+    lastBuildHadBgRemoval = false;
 
     if (bgRemoveEnabledCheckbox.checked) {
       await runBackgroundRemovalFlow();
@@ -1116,10 +1231,6 @@ ghostOnlyCurrentCheckbox.addEventListener('change', () => {
   if (frameMeshes.length) updateGhostOpacity();
 });
 
-cutoutSolidCheckbox.addEventListener('change', () => {
-  if (frameMeshes.length) updateGhostOpacity();
-});
-
 // Autoplay drives "Now" itself, so any manual interaction with it should
 // take back control rather than have the loop fight the user's drag.
 function stopAutoPlay() {
@@ -1138,7 +1249,6 @@ function setSidebarCollapsed(collapsed) {
   panelWindow.classList.toggle('collapsed', collapsed);
 }
 collapseSidebarBtn.addEventListener('click', () => setSidebarCollapsed(true));
-closeSidebarBtn.addEventListener('click', () => setSidebarCollapsed(true));
 expandSidebarBtn.addEventListener('click', () => setSidebarCollapsed(false));
 
 // Position each help tooltip from the icon's real rect right before it

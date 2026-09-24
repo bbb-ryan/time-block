@@ -4,6 +4,22 @@ html, body {
   background: #008080;
 }
 
+/* 98.css only sets display:block on the two real scrollbar arrow buttons
+   (::-webkit-scrollbar-button:vertical:start:decrement and :end:increment)
+   and leaves the other two start/end × increment/decrement combinations
+   unset. Some engines still render those with a nonzero default size
+   instead of collapsing them, showing a duplicate arrow stacked above/
+   below the real one. Force them to zero so exactly one arrow shows per
+   end, matching 98.css's own intent. */
+::-webkit-scrollbar-button:vertical:start:increment,
+::-webkit-scrollbar-button:vertical:end:decrement,
+::-webkit-scrollbar-button:horizontal:start:increment,
+::-webkit-scrollbar-button:horizontal:end:decrement {
+  display: none;
+  height: 0;
+  width: 0;
+}
+
 #desktop {
   display: flex;
   gap: 10px;
