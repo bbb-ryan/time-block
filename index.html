@@ -31,7 +31,7 @@
           <div class="field-row">
             <input type="file" id="fileInput" accept="video/*,.mp4,.mov,.webm,.m4v,.avi,.mkv,.ogv" />
           </div>
-          <p id="fileLabelText" class="hint">No file chosen.</p>
+          <p id="fileLabelText" class="hint"></p>
         </fieldset>
 
         <fieldset id="buildGroup">
@@ -85,7 +85,7 @@
               <span class="help" tabindex="0" data-tip="Optional: composite the subject over this video instead of removing the original background.">?</span>
             </div>
             <input type="file" id="bgVideoInput" accept="video/*,.mp4,.mov,.webm,.m4v,.avi,.mkv,.ogv" />
-            <p id="bgVideoLabelText" class="hint">No background video chosen.</p>
+            <p id="bgVideoLabelText" class="hint"></p>
           </div>
           <div class="field-row">
             <button id="buildBtn" disabled>Build block</button>
@@ -237,7 +237,7 @@
         </fieldset>
       </div>
       <div class="status-bar">
-        <p class="status-bar-field" id="hint">Pick a short video (a few seconds works best), then click Build block.</p>
+        <p class="status-bar-field" id="hint">Pick a short video (&lt;30 seconds works best), then click Build block.</p>
       </div>
     </div>
 
@@ -245,16 +245,14 @@
       <div class="title-bar">
         <div class="title-bar-text">Viewport</div>
         <div class="title-bar-controls">
-          <button aria-label="Minimize"></button>
-          <button aria-label="Maximize"></button>
-          <button aria-label="Close"></button>
+          <button aria-label="Maximize" id="viewportMaximizeBtn" title="Maximize viewport (collapse sidebar)"></button>
         </div>
       </div>
       <div class="window-body" id="stageBody">
         <main id="stage">
           <canvas id="canvas"></canvas>
           <div id="emptyState">
-            <p>No block yet — load a video and click <strong>Build block</strong>.</p>
+            <p>No block yet — load a short video and click <strong>Build block</strong>.</p>
           </div>
         </main>
       </div>

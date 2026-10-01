@@ -128,7 +128,8 @@ An independent cutaway tool — its own position and angle, unrelated to *Elapse
 ### Window chrome
 The sidebar ("Controls") is a Win98-styled window whose title-bar
 Minimize/Maximize buttons collapse it down to a thin strip and restore it, so
-the viewport can have the full window when you want it.
+the viewport can have the full window when you want it. The Viewport window's
+own title-bar Maximize button does the same thing, reachable from either side.
 
 ## Known issues
 
@@ -187,7 +188,5 @@ Not built yet, roughly in priority order:
   ratio before building).
 - **Better pan/zoom** — further camera control refinements beyond the current
   orbit/zoom (e.g. right-click/two-finger pan, fit-to-view, smoother easing).
-- **UI pass** — general polish: clearer disabled-state treatment, real
-  behavior (or removal) of the decorative window-chrome buttons that don't
-  yet do anything (e.g. the Viewport window's own minimize/close), and other
+- **UI pass** — general polish: clearer disabled-state treatment and other
   small consistency fixes.
