@@ -6,6 +6,8 @@ any angle, not just a stack of flat cards. Rotate it to see motion trails ghost
 through the volume, scrub a point in time to reveal what's already happened vs.
 what hasn't, or slice through it at any angle to see a real cross-section.
 
+https://github.com/user-attachments/assets/a1cd6c3e-084c-44c1-b5d7-10abb47c7ab9
+
 Runs entirely client-side — no upload, no server processing. Video decoding,
 frame extraction, background removal (chroma key), and rendering all happen
 in your browser via `<video>`, `<canvas>`, and Three.js/WebGL.
