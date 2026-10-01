@@ -32,6 +32,7 @@ const autoPlayCheckbox = document.getElementById('autoPlay');
 const panelWindow = document.getElementById('panelWindow');
 const collapseSidebarBtn = document.getElementById('collapseSidebarBtn');
 const expandSidebarBtn = document.getElementById('expandSidebarBtn');
+const viewportMaximizeBtn = document.getElementById('viewportMaximizeBtn');
 
 const pointCloudCheckbox = document.getElementById('pointCloudEnabled');
 const pointDensityControls = document.getElementById('pointDensityControls');
@@ -1477,6 +1478,9 @@ function setSidebarCollapsed(collapsed) {
 }
 collapseSidebarBtn.addEventListener('click', () => setSidebarCollapsed(true));
 expandSidebarBtn.addEventListener('click', () => setSidebarCollapsed(false));
+// Viewport's own title-bar "Maximize" — same action as the sidebar's own
+// Minimize button, just reachable from the other window too.
+viewportMaximizeBtn.addEventListener('click', () => setSidebarCollapsed(true));
 
 // Position each help tooltip from the icon's real rect right before it
 // shows, clamped to the viewport — keeps it `position: fixed` so it never
