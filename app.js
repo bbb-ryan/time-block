@@ -1,7 +1,5 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
-import { FilesetResolver, ImageSegmenter } from '@mediapipe/tasks-vision';
-import { alphamask as imglyAlphamask, preload as imglyPreload } from '@imgly/background-removal';
 
 // ---------- DOM ----------
 const fileInput = document.getElementById('fileInput');
@@ -36,9 +34,9 @@ const collapseSidebarBtn = document.getElementById('collapseSidebarBtn');
 const expandSidebarBtn = document.getElementById('expandSidebarBtn');
 
 const pointCloudCheckbox = document.getElementById('pointCloudEnabled');
+const pointDensityControls = document.getElementById('pointDensityControls');
 
 const bgRemoveEnabledCheckbox = document.getElementById('bgRemoveEnabled');
-const bgModelSelect = document.getElementById('bgModel');
 const chromaKeyControls = document.getElementById('chromaKeyControls');
 const chromaKeyColorInput = document.getElementById('chromaKeyColor');
 const bgRemovalWindow = document.getElementById('bgRemovalWindow');
@@ -50,6 +48,12 @@ const bgProgressFill = document.getElementById('bgProgressFill');
 const bgProgressLabel = document.getElementById('bgProgressLabel');
 const bgPreviewWrap = document.getElementById('bgPreviewWrap');
 const bgPreviewCanvas = document.getElementById('bgPreviewCanvas');
+const bgVideoInput = document.getElementById('bgVideoInput');
+const bgVideoLabelText = document.getElementById('bgVideoLabelText');
+const bgVideoUploadControls = document.getElementById('bgVideoUploadControls');
+const bgVideoOpacityControls = document.getElementById('bgVideoOpacityControls');
+const bgOnlyCurrentCheckbox = document.getElementById('bgOnlyCurrent');
+const bgVideoEl = document.getElementById('bgSourceVideo');
 
 // ---------- three.js setup ----------
 const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, preserveDrawingBuffer: true });
@@ -60,7 +64,12 @@ const scene = new THREE.Scene();
 const camera = new THREE.PerspectiveCamera(45, 1, 0.01, 100);
 
 const defaultTarget = new THREE.Vector3(0, 0, 0);
-const cameraDir = new THREE.Vector3(0.62, 0.42, 0.66).normalize();
+// Frame i sits at z = (i - (n-1)/2) * depthStep (see layoutBlock()), so
+// frame 0 — the start of the clip — is always at the NEGATIVE z end and the
+// last frame at the positive end. A negative z here puts the default/reset
+// camera on frame 0's side, so the block reads start-to-end like the source
+// footage instead of opening on its last moment.
+const cameraDir = new THREE.Vector3(0.62, 0.42, -0.66).normalize();
 
 const controls = new OrbitControls(camera, renderer.domElement);
 controls.enableDamping = true;
@@ -174,6 +183,7 @@ let boxHelper = null;
 let capGroup = null;
 let totalDepth = 0;
 let currentObjectURL = null;
+let bgVideoObjectURL = null;
 // Whether the frames currently in frameData have real per-pixel alpha baked
 // in (vs. uniformly opaque). Drives "remove background on solid frames"
 // automatically — no separate toggle, since it's only ever meaningful when
@@ -181,7 +191,7 @@ let currentObjectURL = null;
 // otherwise.
 let lastBuildHadBgRemoval = false;
 
-// Two independent planes: `ghostPlane` (View → Now) decides what's elapsed
+// Two independent planes: `ghostPlane` (View → Elapsed) decides what's elapsed
 // and drives opacity only; `clipPlane` (Slice) is its own cutaway tool with
 // its own position/tilt and only acts when Hard cut / Enable slice is on.
 const ghostPlane = new THREE.Plane(new THREE.Vector3(0, 0, 1), 0);
@@ -369,7 +379,7 @@ async function extractFrames(videoEl, count, maxWidth, onProgress) {
       top: edgeStripTexture(c, 'top'),
       bottom: edgeStripTexture(c, 'bottom'),
     };
-    frames.push({ texture: tex, edges });
+    frames.push({ texture: tex, edges, time: t });
     onProgress(i + 1, count);
     // Yield so the progress bar repaints between frames. setTimeout, not
     // requestAnimationFrame — rAF callbacks are suspended entirely while
@@ -380,117 +390,49 @@ async function extractFrames(videoEl, count, maxWidth, onProgress) {
   return frames;
 }
 
-// ---------- background removal (ML segmentation) ----------
-// Two selectable models, dispatched by `bgModelSelect.value`. Both funnel
-// into the same per-frame contract — { bgMask: Float32Array(0..1), bgMaskW,
-// bgMaskH } cached on each frame — so bakeBackgroundAlpha/updateBgPreview/
-// finalizeBackgroundRemoval below don't care which one ran.
+// Samples a replacement background video at the *exact* timestamps the main
+// video was already sampled at (not a re-derived fraction of the background
+// video's own duration), so the two line up frame-for-frame regardless of
+// how their durations compare. Clamping each timestamp to the background
+// video's own duration is the one thing needed to get both edge cases right
+// at once: a shorter background video simply keeps re-seeking to its own
+// last moment (holding that frame) for every remaining timestamp, and a
+// longer one is never sampled past where the main video ends.
+async function extractPairedFrames(videoEl, timestamps, maxWidth, onProgress) {
+  const scale = Math.min(1, maxWidth / videoEl.videoWidth);
+  const w = Math.max(2, Math.round(videoEl.videoWidth * scale));
+  const h = Math.max(2, Math.round(videoEl.videoHeight * scale));
+  const safeDuration = Math.max(0, videoEl.duration - 0.05);
+  const frames = [];
 
-// -- Model: MediaPipe selfie_segmenter (fast, tuned for real people) --
-// Lazily created once, on first use — avoids downloading the model/WASM
-// runtime for anyone who never checks "Remove background".
-let segmenterPromise = null;
-function getSegmenter() {
-  if (!segmenterPromise) {
-    segmenterPromise = (async () => {
-      const vision = await FilesetResolver.forVisionTasks(
-        'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@1.0.1/wasm'
-      );
-      return ImageSegmenter.createFromOptions(vision, {
-        baseOptions: {
-          modelAssetPath:
-            'https://storage.googleapis.com/mediapipe-models/image_segmenter/selfie_segmenter/float16/latest/selfie_segmenter.tflite',
-        },
-        runningMode: 'IMAGE',
-        outputCategoryMask: false,
-        outputConfidenceMasks: true,
-      });
-    })();
-  }
-  return segmenterPromise;
-}
-
-// Runs inference on every already-extracted frame and caches a foreground-
-// confidence mask per frame. The mask array MediaPipe hands back is only
-// valid inside the result callback (it's owned by the underlying WASM
-// task), so it's copied out immediately.
-async function computeBackgroundMasksMediaPipe(frames, onProgress) {
-  const segmenter = await getSegmenter();
-  for (let i = 0; i < frames.length; i++) {
-    const sourceCanvas = frames[i].texture.image;
-    await new Promise((resolve, reject) => {
-      try {
-        segmenter.segment(sourceCanvas, (result) => {
-          const mask = result.confidenceMasks[0];
-          frames[i].bgMask = mask.getAsFloat32Array();
-          frames[i].bgMaskW = mask.width;
-          frames[i].bgMaskH = mask.height;
-          resolve();
-        });
-      } catch (err) {
-        reject(err);
-      }
-    });
-    onProgress(i + 1, frames.length);
-    // Same rationale as extractFrames' yield below: setTimeout survives a
-    // backgrounded tab, requestAnimationFrame does not.
+  for (let i = 0; i < timestamps.length; i++) {
+    const t = Math.min(timestamps[i], safeDuration);
+    await seekTo(videoEl, t);
+    const c = document.createElement('canvas');
+    c.width = w;
+    c.height = h;
+    c.getContext('2d').drawImage(videoEl, 0, 0, w, h);
+    const tex = new THREE.CanvasTexture(c);
+    tex.colorSpace = THREE.SRGBColorSpace;
+    tex.needsUpdate = true;
+    const edges = {
+      right: edgeStripTexture(c, 'right'),
+      left: edgeStripTexture(c, 'left'),
+      top: edgeStripTexture(c, 'top'),
+      bottom: edgeStripTexture(c, 'bottom'),
+    };
+    frames.push({ texture: tex, edges });
+    onProgress(i + 1, timestamps.length);
     await new Promise((r) => setTimeout(r, 0));
   }
+  return frames;
 }
 
-// -- Model: @imgly/background-removal (ISNet, class-agnostic salient-
-// object segmentation — slower, but not limited to photographic people) --
-// Stable object reference: the library memoizes its model session by
-// JSON.stringify(config), so reusing this same object across every frame
-// (and across builds) means the model downloads/initializes only once.
-const IMGLY_CONFIG = { model: 'isnet_fp16' };
-
-// alphamask() returns a Blob: an image the same size as the input, RGB
-// forced to white and alpha set to the mask confidence (0-255) — decoding
-// it and reading only the alpha channel gives the same Float32Array(0..1)
-// shape the MediaPipe path produces.
-async function blobAlphaToFloatArray(blob, w, h) {
-  const bitmap = await createImageBitmap(blob);
-  const c = document.createElement('canvas');
-  c.width = w;
-  c.height = h;
-  const cctx = c.getContext('2d');
-  cctx.drawImage(bitmap, 0, 0, w, h);
-  bitmap.close();
-  const data = cctx.getImageData(0, 0, w, h).data;
-  const arr = new Float32Array(w * h);
-  for (let i = 0; i < arr.length; i++) arr[i] = data[i * 4 + 3] / 255;
-  return arr;
-}
-
-function canvasToPngBlob(canvas) {
-  return new Promise((resolve) => canvas.toBlob(resolve, 'image/png'));
-}
-
-async function computeBackgroundMasksImgly(frames, onProgress) {
-  await imglyPreload(IMGLY_CONFIG);
-  for (let i = 0; i < frames.length; i++) {
-    const sourceCanvas = frames[i].texture.image;
-    // The library declares ImageData as an accepted ImageSource in its
-    // type, but imageSourceToImageData() only actually converts
-    // string/URL/ArrayBuffer/Uint8Array/Blob at runtime — anything else
-    // (including ImageData or a raw canvas) passes through unconverted and
-    // later fails destructuring `.shape`. A PNG Blob is a path that's
-    // actually implemented (imageDecode -> createImageBitmap).
-    const blob = await canvasToPngBlob(sourceCanvas);
-    const maskBlob = await imglyAlphamask(blob, IMGLY_CONFIG);
-    frames[i].bgMask = await blobAlphaToFloatArray(maskBlob, sourceCanvas.width, sourceCanvas.height);
-    frames[i].bgMaskW = sourceCanvas.width;
-    frames[i].bgMaskH = sourceCanvas.height;
-    onProgress(i + 1, frames.length);
-    await new Promise((r) => setTimeout(r, 0));
-  }
-}
-
-// -- Model: chroma key (deterministic color-distance, no ML at all) --
-// The only one of the three that's genuinely fast at any frame count — no
-// model download, no inference — so it fits the same Phase 1/Phase 2 shape
-// as the ML models even though nothing here is actually slow.
+// ---------- background removal (chroma key) ----------
+// Deterministic color-distance thresholding against a picked key color — no
+// ML model, no download, no inference. Produces the same per-frame contract
+// { bgMask: Float32Array(0..1), bgMaskW, bgMaskH } cached on each frame that
+// bakeBackgroundAlpha/updateBgPreview/finalizeBackgroundRemoval below rely on.
 function hexToRgb(hex) {
   const v = parseInt(hex.slice(1), 16);
   return { r: (v >> 16) & 255, g: (v >> 8) & 255, b: v & 255 };
@@ -501,8 +443,9 @@ function smoothstep(t) {
   return t * t * (3 - 2 * t);
 }
 
-async function computeBackgroundMasksChromaKey(frames, onProgress, keyColorHex, tolerancePercent) {
-  const { r: kr, g: kg, b: kb } = hexToRgb(keyColorHex);
+async function computeBackgroundMasks(frames, onProgress) {
+  const { r: kr, g: kg, b: kb } = hexToRgb(chromaKeyColorInput.value);
+  const tolerancePercent = parseFloat(chromaToleranceSlider.value);
   // Max possible per-pixel RGB Euclidean distance is sqrt(3 * 255^2); the
   // tolerance slider (1-100) is a percentage of that. `feather` widens a
   // soft transition band around the threshold instead of a hard cutoff,
@@ -532,22 +475,6 @@ async function computeBackgroundMasksChromaKey(frames, onProgress, keyColorHex, 
     frames[i].bgMaskH = h;
     onProgress(i + 1, frames.length);
     await new Promise((r) => setTimeout(r, 0));
-  }
-}
-
-async function computeBackgroundMasks(frames, onProgress) {
-  const model = bgModelSelect.value;
-  if (model === 'imgly') {
-    await computeBackgroundMasksImgly(frames, onProgress);
-  } else if (model === 'chromakey') {
-    await computeBackgroundMasksChromaKey(
-      frames,
-      onProgress,
-      chromaKeyColorInput.value,
-      parseFloat(chromaToleranceSlider.value)
-    );
-  } else {
-    await computeBackgroundMasksMediaPipe(frames, onProgress);
   }
 }
 
@@ -587,8 +514,11 @@ let bgPreviewFrameIndex = 0;
 function updateBgPreview() {
   const frame = frameData[bgPreviewFrameIndex];
   if (!frame || !frame.bgMask) return;
-  const bgOpacity = parseFloat(bgOpacitySlider.value);
-  const baked = bakeBackgroundAlpha(frame.texture.image, frame.bgMask, frame.bgMaskW, frame.bgMaskH, bgOpacity);
+  // Fixed reference opacity (fully removed) — this is just a sanity check
+  // that the mask isolates the subject correctly. The real, live-adjustable
+  // opacity control lives in the View panel once the block is built; it's
+  // no longer decided here.
+  const baked = bakeBackgroundAlpha(frame.texture.image, frame.bgMask, frame.bgMaskW, frame.bgMaskH, 0);
   bgPreviewCanvas.width = baked.width;
   bgPreviewCanvas.height = baked.height;
   const pctx = bgPreviewCanvas.getContext('2d');
@@ -599,25 +529,113 @@ function updateBgPreview() {
   pctx.drawImage(baked, 0, 0);
 }
 
-// Bakes the finalized opacity into every frame and swaps each frame's
-// texture/edge-strip sources for the masked versions — same disposal +
-// recreation pattern the build handler already uses when frameData changes.
-function finalizeBackgroundRemoval(bgOpacity) {
+// Renders the raw Float32Array mask (0..1 foreground confidence) into a
+// plain grayscale canvas — confidence in every channel so either a
+// grayscale or single-channel read works. This is what actually gets used
+// (as a GPU texture, sampled live by a shader) instead of the old approach
+// of baking a fixed opacity into the RGB texture's own alpha channel once.
+function maskToCanvas(mask, maskW, maskH) {
+  const canvas = document.createElement('canvas');
+  canvas.width = maskW;
+  canvas.height = maskH;
+  const ctx = canvas.getContext('2d');
+  const imgData = ctx.createImageData(maskW, maskH);
+  const data = imgData.data;
+  for (let i = 0; i < mask.length; i++) {
+    const v = Math.round(mask[i] * 255);
+    data[i * 4] = v;
+    data[i * 4 + 1] = v;
+    data[i * 4 + 2] = v;
+    data[i * 4 + 3] = 255;
+  }
+  ctx.putImageData(imgData, 0, 0);
+  return canvas;
+}
+
+function canvasToMaskTexture(canvas) {
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.generateMipmaps = false;
+  tex.minFilter = THREE.LinearFilter;
+  tex.magFilter = THREE.LinearFilter;
+  tex.needsUpdate = true;
+  return tex;
+}
+
+// Builds a mask texture (whole frame + the 4 edge strips, via the same
+// generic edgeStripTexture() already used for RGB) for every frame with a
+// cached mask. The original RGB texture/edges are never touched — no bake,
+// no fixed opacity decided here. Background opacity is read live from
+// these mask textures by a shader uniform instead (patchBackgroundMaterial /
+// updateBackgroundCompositing), adjustable any time after the block exists,
+// without re-running this or rebuilding.
+function finalizeBackgroundRemoval() {
   frameData.forEach((frame) => {
-    const baked = bakeBackgroundAlpha(frame.texture.image, frame.bgMask, frame.bgMaskW, frame.bgMaskH, bgOpacity);
-    frame.texture.dispose();
-    Object.values(frame.edges).forEach((t) => t.dispose());
-    const tex = new THREE.CanvasTexture(baked);
-    tex.colorSpace = THREE.SRGBColorSpace;
-    tex.needsUpdate = true;
-    frame.texture = tex;
-    frame.edges = {
-      right: edgeStripTexture(baked, 'right'),
-      left: edgeStripTexture(baked, 'left'),
-      top: edgeStripTexture(baked, 'top'),
-      bottom: edgeStripTexture(baked, 'bottom'),
+    if (!frame.bgMask) return;
+    const maskCanvas = maskToCanvas(frame.bgMask, frame.bgMaskW, frame.bgMaskH);
+    frame.maskTexture = canvasToMaskTexture(maskCanvas);
+    frame.maskEdges = {
+      right: edgeStripTexture(maskCanvas, 'right'),
+      left: edgeStripTexture(maskCanvas, 'left'),
+      top: edgeStripTexture(maskCanvas, 'top'),
+      bottom: edgeStripTexture(maskCanvas, 'bottom'),
     };
   });
+}
+
+// Patches a MeshBasicMaterial's own compiled shader (via onBeforeCompile,
+// not a hand-rolled ShaderMaterial) so clipping planes — used by Slice —
+// keep working automatically instead of needing to be reimplemented by
+// hand. Injects right after <map_fragment>, at which point diffuseColor.a
+// already equals the material's own `opacity` uniform (untouched — the
+// pristine RGB texture this app extracts always has alpha 1), multiplying
+// in the mask-driven background fade *on top of* it. That's what makes the
+// ghost-opacity multiplication automatic: `updateGhostOpacity()` already
+// drives `material.opacity` every time Now/ghost state changes, unchanged;
+// this shader just multiplies that by the live `uBgTargetOpacity` (resolved
+// host-side by updateBackgroundCompositing(), see below) for background
+// pixels, and 1.0 (no change) for foreground ones.
+function patchBackgroundMaterial(material, maskMap) {
+  const uniforms = {
+    uMaskMap: { value: maskMap },
+    // Whether THIS frame has a paired replacement-video frame at all (fixed
+    // at build time) — decides whether background pixels show the
+    // replacement's own color at all, independent of how visible they are.
+    uBgVideoExists: { value: 0 },
+    // The single number that actually decides background alpha, already
+    // resolved host-side by updateBackgroundCompositing() for whichever
+    // mode is active (only-current crossfade, or Background opacity vs.
+    // Background ghost opacity split by played/not-played) — the shader
+    // doesn't need to know which.
+    uBgTargetOpacity: { value: 0 },
+    uBgVideoMap: { value: null },
+  };
+  material.userData.bgUniforms = uniforms;
+  material.onBeforeCompile = (shader) => {
+    Object.assign(shader.uniforms, uniforms);
+    shader.fragmentShader = shader.fragmentShader
+      .replace(
+        '#include <common>',
+        `#include <common>
+        uniform sampler2D uMaskMap;
+        uniform float uBgVideoExists;
+        uniform float uBgTargetOpacity;
+        uniform sampler2D uBgVideoMap;`
+      )
+      .replace(
+        '#include <map_fragment>',
+        `#include <map_fragment>
+        {
+          float fg = texture2D( uMaskMap, vMapUv ).r;
+          if ( uBgVideoExists > 0.5 ) {
+            vec3 bgColor = texture2D( uBgVideoMap, vMapUv ).rgb;
+            diffuseColor.rgb = mix( bgColor, diffuseColor.rgb, fg );
+          }
+          diffuseColor.a *= mix( uBgTargetOpacity, 1.0, fg );
+        }`
+      );
+  };
+  material.needsUpdate = true;
+  return uniforms;
 }
 
 function showBgRemovalWindow() {
@@ -635,12 +653,13 @@ function hideBgRemovalWindow() {
 }
 
 // Runs entirely between extraction and buildBlock(): shows the modal,
-// computes masks (Phase 1) with its own progress bar, previews the middle
-// frame live as the opacity slider moves (Phase 2, single frame), then
-// waits for the user to confirm or skip before the 3D object is built.
+// computes masks with its own progress bar, shows a fixed-opacity preview
+// of the middle frame so the mask quality can be sanity-checked, then waits
+// for the user to confirm or skip before the 3D object is built. The actual
+// background opacity is no longer decided here — see updateBackgroundCompositing().
 async function runBackgroundRemovalFlow() {
   showBgRemovalWindow();
-  hint.textContent = 'Loading segmentation model…';
+  hint.textContent = 'Keying out the background…';
 
   try {
     await computeBackgroundMasks(frameData, (i, n) => {
@@ -683,11 +702,11 @@ async function runBackgroundRemovalFlow() {
 
   hideBgRemovalWindow();
   if (choice === 'confirm') {
-    finalizeBackgroundRemoval(parseFloat(bgOpacitySlider.value));
+    finalizeBackgroundRemoval();
     lastBuildHadBgRemoval = true;
   }
   buildBlock();
-  hint.textContent = 'Drag to orbit, use the Zoom bar or scroll to zoom. Drag "Now" in View to scrub elapsed vs. solid.';
+  hint.textContent = 'Drag to orbit, use the Zoom bar or scroll to zoom. Drag "Elapsed" in View to scrub elapsed vs. solid.';
 }
 
 function rebuildBoxHelper(w, h, d) {
@@ -828,7 +847,15 @@ function updateSliceCaps() {
   disposeCapGroup();
   // Point-cloud frames have no volume to cap — clippingPlanes already cuts
   // them cleanly (a naturally jagged edge of dots), which fits the look.
-  if (!sliceEnabledCheckbox.checked || !frameMeshes.length || pointCloudCheckbox.checked) return;
+  if (!sliceEnabledCheckbox.checked || !frameMeshes.length || pointCloudCheckbox.checked) {
+    // Slice is off in the common case, which means this return used to skip
+    // right past the frameMeshes sync at the bottom of this function too —
+    // background compositing would never run at all outside of Slice being
+    // enabled. Every exit path needs it, not just the "caps actually built"
+    // one below.
+    updateBackgroundCompositing();
+    return;
+  }
 
   const halfW = PLANE_W / 2;
   const halfH = planeH / 2;
@@ -873,14 +900,37 @@ function updateSliceCaps() {
       opacity,
       depthWrite: !blendAlpha,
     });
-    group.add(new THREE.Mesh(geo, mat));
+    // Cap UVs are laid out across the full frame (same space as the front/
+    // back face), so the whole-frame mask/bg-video textures apply directly —
+    // no edge-strip variant needed here, unlike the side box faces.
+    if (lastBuildHadBgRemoval && frameData[i].maskTexture) {
+      const u = patchBackgroundMaterial(mat, frameData[i].maskTexture);
+      if (frameData[i].bgVideoTexture) {
+        u.uBgVideoMap.value = frameData[i].bgVideoTexture;
+        u.uBgVideoExists.value = 1;
+      }
+    }
+    const capMesh = new THREE.Mesh(geo, mat);
+    // Not every frame yields a cap polygon (see the `if (!poly) return`
+    // above), so capGroup's children aren't index-aligned with frameMeshes —
+    // tag each cap with its real frame index so updateBackgroundCompositing()
+    // can look up the right "only on current frame" comparison later.
+    capMesh.userData.frameIndex = i;
+    group.add(capMesh);
   });
 
   scene.add(group);
   capGroup = group;
+  // Caps are rebuilt from scratch here, so any background-patched material
+  // above starts back at patchBackgroundMaterial()'s uBgTargetOpacity:0
+  // default — sync it to the live slider immediately rather than leaving it stuck
+  // until something else happens to call updateBackgroundCompositing()
+  // (updateSliceCaps() is called from slice-position/tilt/enable changes
+  // too, not just updateGhostOpacity()).
+  updateBackgroundCompositing();
 }
 
-// View → Now: the scrub point. Frames before it are elapsed (ghosted),
+// View → Elapsed: the scrub point. Frames before it are elapsed (ghosted),
 // frames from it onward haven't elapsed yet (solid). Fixed normal along the
 // depth/time axis — this is purely a time concept, no tilt.
 function updateGhostPlane() {
@@ -906,11 +956,12 @@ function updateGhostOpacity() {
   frameMeshes.forEach((mesh, i) => {
     const opacity = frameOpacityAt(mesh, i, n);
     const solid = opacity >= 0.999;
-    // Background removal only ever writes the texture's ALPHA channel
-    // (bakeBackgroundAlpha leaves RGB untouched) — a material rendered
-    // with transparent:false ignores that alpha entirely and shows the
-    // full original frame. When the current build actually has background
-    // removal baked in, solid frames get the same alpha-aware treatment
+    // Background-removed frames compute their alpha live in a shader patch
+    // (patchBackgroundMaterial) driven by the mask texture and this same
+    // `opacity` value — a material rendered with transparent:false ignores
+    // that alpha entirely and shows the full original frame regardless of
+    // what the shader computed. When the current build actually has
+    // background removal, solid frames get the same alpha-aware treatment
     // ghosted frames already get, so the cutout actually shows (on
     // front/back AND the 4 side faces, since they share this materials
     // loop). Without background removal, blendAlpha reduces to exactly
@@ -930,7 +981,78 @@ function updateGhostOpacity() {
       m.needsUpdate = true;
     });
   });
+  // updateSliceCaps() calls updateBackgroundCompositing() itself now (it
+  // has to, since caps are rebuilt from scratch on other triggers too), so
+  // frameMeshes and caps end up synced from this one call.
   updateSliceCaps();
+}
+
+// Live, no-rebuild-needed background compositing: reads the current
+// Background opacity / Background ghost opacity sliders and "only on
+// current frame" checkbox, and writes the resolved result straight into
+// each background-patched material's shader uniform (uBgTargetOpacity).
+
+// Only used in "only on current frame" mode: a frame-index window either
+// side of the exact current position that crossfades in/out, instead of a
+// single Math.round()'d index snapping from fully off to fully on. Autoplay
+// moves the exact position continuously, so a hard index match toggled on
+// and off roughly every 75ms (80 frames / 6s loop) — read as flashing, not
+// a transition.
+const BG_ACTIVE_FADE_FRAMES = 1.5;
+
+// Resolves what a background pixel's alpha multiplier should be for one
+// frame, given which mode is active:
+// - No replacement video at all: flat Background opacity, same as plain
+//   (non-video) background removal always worked.
+// - "Only on current frame" on: a crossfade peaking at Background opacity
+//   right at Now, per BG_ACTIVE_FADE_FRAMES above.
+// - Otherwise: a frame whose moment hasn't passed yet (or is the exact
+//   current one) uses Background opacity, a multiplier on the full
+//   replacement video. One that HAS already played uses Background ghost
+//   opacity instead — and since this return value is multiplied straight
+//   into diffuseColor.a, which already equals the material's own `opacity`
+//   (1 for solid frames, Ghost opacity for elapsed ones — see
+//   updateGhostOpacity()), that multiplication with Ghost opacity falls out
+//   for free exactly like the original "0.25 background × 0.2 ghost = 0.05"
+//   request, just using Background ghost opacity instead of Background
+//   opacity for the elapsed case.
+function bgTargetOpacityFor(mesh, i, exactIndex, hasVideo, bgOpacity, bgGhostOpacity, onlyCurrent) {
+  if (!hasVideo) return bgOpacity;
+  if (onlyCurrent) {
+    const dist = Math.abs(i - exactIndex);
+    return bgOpacity * Math.max(0, 1 - dist / BG_ACTIVE_FADE_FRAMES);
+  }
+  const elapsed = ghostPlane.distanceToPoint(mesh.position) < 0;
+  return elapsed ? bgGhostOpacity : bgOpacity;
+}
+
+function updateBackgroundCompositing() {
+  const n = frameMeshes.length;
+  const bgOpacity = parseFloat(bgOpacitySlider.value);
+  const bgGhostOpacity = parseFloat(bgGhostOpacitySlider.value);
+  const onlyCurrent = bgOnlyCurrentCheckbox.checked;
+  const exactIndex = parseFloat(nowSlider.value) * (n - 1);
+  frameMeshes.forEach((mesh, i) => {
+    meshMaterials(mesh).forEach((m) => {
+      const u = m.userData && m.userData.bgUniforms;
+      if (!u) return;
+      const hasVideo = !!u.uBgVideoMap.value;
+      u.uBgTargetOpacity.value = bgTargetOpacityFor(mesh, i, exactIndex, hasVideo, bgOpacity, bgGhostOpacity, onlyCurrent);
+    });
+  });
+  // Slice caps are patched the same way (see updateSliceCaps()) but rebuilt
+  // fresh every time ghost/slice state changes, so they need this same live
+  // sync too — otherwise they'd sit stuck at the uBgTargetOpacity:0 default
+  // patchBackgroundMaterial() initializes them with.
+  if (capGroup) {
+    capGroup.children.forEach((mesh) => {
+      const u = mesh.material.userData && mesh.material.userData.bgUniforms;
+      if (!u) return;
+      const i = mesh.userData.frameIndex;
+      const hasVideo = !!u.uBgVideoMap.value;
+      u.uBgTargetOpacity.value = bgTargetOpacityFor(mesh, i, exactIndex, hasVideo, bgOpacity, bgGhostOpacity, onlyCurrent);
+    });
+  }
 }
 
 function layoutBlock(spacingValue) {
@@ -1045,7 +1167,8 @@ function buildBlock() {
   const asPoints = pointCloudCheckbox.checked;
   const pointStride = parseInt(pointDensitySlider.value, 10);
 
-  frameMeshes = frameData.map(({ texture, edges }, i) => {
+  frameMeshes = frameData.map((frame, i) => {
+    const { texture, edges } = frame;
     if (asPoints) {
       const points = buildFramePoints(texture, pointStride, opacity0, clippingPlanes0, i);
       group.add(points);
@@ -1066,14 +1189,38 @@ function buildBlock() {
     // a real extruded slit-scan surface, not a flat tint or squashed copy.
     const faceMat = (map) => new THREE.MeshBasicMaterial({ map, ...commonProps });
     // BoxGeometry face order: +x, -x, +y, -y, +z, -z
-    const materials = [
-      faceMat(edges.right),
-      faceMat(edges.left),
-      faceMat(edges.top),
-      faceMat(edges.bottom),
-      faceMat(texture),
-      faceMat(texture),
-    ];
+    const rightMat = faceMat(edges.right);
+    const leftMat = faceMat(edges.left);
+    const topMat = faceMat(edges.top);
+    const bottomMat = faceMat(edges.bottom);
+    const frontMat = faceMat(texture);
+    const backMat = faceMat(texture);
+
+    // Background removal patches each face's shader with its matching mask
+    // (the mask's own edge strips for the 4 side faces, the whole-frame mask
+    // for front/back) so Background opacity reads live from a uniform
+    // instead of a value baked into pixels at build time — see
+    // patchBackgroundMaterial(). A replacement background video, if one was
+    // extracted at matching timestamps, is wired the same way per face.
+    if (lastBuildHadBgRemoval && frame.maskTexture) {
+      const facePairs = [
+        [rightMat, frame.maskEdges.right, frame.bgVideoEdges && frame.bgVideoEdges.right],
+        [leftMat, frame.maskEdges.left, frame.bgVideoEdges && frame.bgVideoEdges.left],
+        [topMat, frame.maskEdges.top, frame.bgVideoEdges && frame.bgVideoEdges.top],
+        [bottomMat, frame.maskEdges.bottom, frame.bgVideoEdges && frame.bgVideoEdges.bottom],
+        [frontMat, frame.maskTexture, frame.bgVideoTexture],
+        [backMat, frame.maskTexture, frame.bgVideoTexture],
+      ];
+      facePairs.forEach(([mat, maskMap, bgVideoMap]) => {
+        const u = patchBackgroundMaterial(mat, maskMap);
+        if (bgVideoMap) {
+          u.uBgVideoMap.value = bgVideoMap;
+          u.uBgVideoExists.value = 1;
+        }
+      });
+    }
+
+    const materials = [rightMat, leftMat, topMat, bottomMat, frontMat, backMat];
 
     const mesh = new THREE.Mesh(new THREE.BoxGeometry(PLANE_W, planeH, 1), materials);
     group.add(mesh);
@@ -1097,18 +1244,46 @@ bindRange('frameCount', 'frameCountVal');
 bindRange('sampleWidth', 'sampleWidthVal');
 const pointDensitySlider = bindRange('pointDensity', 'pointDensityVal');
 
+// Lives in the View panel now, not the pre-build modal — live and
+// adjustable any time after the block exists, no rebuild needed. Still
+// bound by the same `bindRange` helper; only what `onInput` calls changed.
 const bgOpacitySlider = bindRange('bgOpacity', 'bgOpacityVal', {
   decimals: 2,
-  onInput: () => updateBgPreview(),
+  onInput: () => {
+    if (frameMeshes.length) updateBackgroundCompositing();
+  },
+});
+
+const bgGhostOpacitySlider = bindRange('bgGhostOpacity', 'bgGhostOpacityVal', {
+  decimals: 2,
+  onInput: () => {
+    if (frameMeshes.length) updateBackgroundCompositing();
+  },
 });
 
 const chromaToleranceSlider = bindRange('chromaTolerance', 'chromaToleranceVal');
 
-function updateChromaKeyControlsVisibility() {
-  chromaKeyControls.classList.toggle('hidden', bgModelSelect.value !== 'chromakey');
+function updateRemoveBackgroundControlsVisibility() {
+  const on = bgRemoveEnabledCheckbox.checked;
+  chromaKeyControls.classList.toggle('hidden', !on);
+  bgVideoUploadControls.classList.toggle('hidden', !on);
 }
-bgModelSelect.addEventListener('change', updateChromaKeyControlsVisibility);
-updateChromaKeyControlsVisibility();
+bgRemoveEnabledCheckbox.addEventListener('change', updateRemoveBackgroundControlsVisibility);
+updateRemoveBackgroundControlsVisibility();
+
+function updatePointDensityControlsVisibility() {
+  pointDensityControls.classList.toggle('hidden', !pointCloudCheckbox.checked);
+}
+pointCloudCheckbox.addEventListener('change', updatePointDensityControlsVisibility);
+updatePointDensityControlsVisibility();
+
+// Background opacity / Background ghost opacity / "only on current frame"
+// only mean anything once a replacement background video is actually
+// attached — hidden otherwise rather than shown as dead controls.
+function updateBgVideoOpacityControlsVisibility() {
+  bgVideoOpacityControls.classList.toggle('hidden', bgVideoInput.files.length === 0);
+}
+updateBgVideoOpacityControlsVisibility();
 
 const spacingSlider = bindRange('spacing', 'spacingVal', {
   decimals: 2,
@@ -1176,6 +1351,34 @@ fileInput.addEventListener('change', (e) => {
   );
 });
 
+bgVideoInput.addEventListener('change', (e) => {
+  updateBgVideoOpacityControlsVisibility();
+  const file = e.target.files[0];
+  if (!file) return;
+
+  bgVideoLabelText.textContent = `Loading ${file.name}…`;
+
+  if (bgVideoObjectURL) URL.revokeObjectURL(bgVideoObjectURL);
+  bgVideoObjectURL = URL.createObjectURL(file);
+  bgVideoEl.src = bgVideoObjectURL;
+
+  bgVideoEl.addEventListener(
+    'loadedmetadata',
+    () => {
+      bgVideoLabelText.textContent = `${file.name} (${bgVideoEl.duration.toFixed(1)}s)`;
+    },
+    { once: true }
+  );
+
+  bgVideoEl.addEventListener(
+    'error',
+    () => {
+      bgVideoLabelText.textContent = 'Could not load that background video — try a different format.';
+    },
+    { once: true }
+  );
+});
+
 buildBtn.addEventListener('click', async () => {
   buildBtn.disabled = true;
   fileInput.disabled = true;
@@ -1195,15 +1398,35 @@ buildBtn.addEventListener('click', async () => {
     frameData.forEach((f) => {
       f.texture.dispose();
       Object.values(f.edges).forEach((t) => t.dispose());
+      if (f.maskTexture) f.maskTexture.dispose();
+      if (f.maskEdges) Object.values(f.maskEdges).forEach((t) => t.dispose());
+      if (f.bgVideoTexture) f.bgVideoTexture.dispose();
+      if (f.bgVideoEdges) Object.values(f.bgVideoEdges).forEach((t) => t.dispose());
     });
     frameData = newFrameData;
     lastBuildHadBgRemoval = false;
+
+    // A replacement background video only matters once background removal
+    // actually punches a hole for it to show through — extracted here, right
+    // after the main video, so its frames exist before finalizeBackgroundRemoval()
+    // / buildBlock() read frame.bgVideoTexture.
+    if (bgRemoveEnabledCheckbox.checked && bgVideoInput.files.length && bgVideoEl.readyState >= 1) {
+      const timestamps = frameData.map((f) => f.time);
+      const pairedFrames = await extractPairedFrames(bgVideoEl, timestamps, maxW, (i, n) => {
+        progressFill.style.width = `${(i / n) * 100}%`;
+        progressLabel.textContent = `Extracting background video frames… ${i} / ${n}`;
+      });
+      pairedFrames.forEach((pf, i) => {
+        frameData[i].bgVideoTexture = pf.texture;
+        frameData[i].bgVideoEdges = pf.edges;
+      });
+    }
 
     if (bgRemoveEnabledCheckbox.checked) {
       await runBackgroundRemovalFlow();
     } else {
       buildBlock();
-      hint.textContent = 'Drag to orbit, use the Zoom bar or scroll to zoom. Drag "Now" in View to scrub elapsed vs. solid.';
+      hint.textContent = 'Drag to orbit, use the Zoom bar or scroll to zoom. Drag "Elapsed" in View to scrub elapsed vs. solid.';
     }
   } catch (err) {
     console.error(err);
@@ -1231,7 +1454,11 @@ ghostOnlyCurrentCheckbox.addEventListener('change', () => {
   if (frameMeshes.length) updateGhostOpacity();
 });
 
-// Autoplay drives "Now" itself, so any manual interaction with it should
+bgOnlyCurrentCheckbox.addEventListener('change', () => {
+  if (frameMeshes.length) updateBackgroundCompositing();
+});
+
+// Autoplay drives "Elapsed" itself, so any manual interaction with it should
 // take back control rather than have the loop fight the user's drag.
 function stopAutoPlay() {
   autoPlayCheckbox.checked = false;
@@ -1239,7 +1466,7 @@ function stopAutoPlay() {
 nowSlider.addEventListener('pointerdown', stopAutoPlay);
 document.getElementById('nowPosVal').addEventListener('focus', stopAutoPlay);
 
-// Resume from wherever "Now" currently sits, not wherever the accumulator
+// Resume from wherever "Elapsed" currently sits, not wherever the accumulator
 // last was (e.g. after the user manually repositioned it).
 autoPlayCheckbox.addEventListener('change', () => {
   if (autoPlayCheckbox.checked) autoPlayPos = parseFloat(nowSlider.value) || 0;

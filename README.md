@@ -7,9 +7,8 @@ through the volume, scrub a point in time to reveal what's already happened vs.
 what hasn't, or slice through it at any angle to see a real cross-section.
 
 Runs entirely client-side — no upload, no server processing. Video decoding,
-frame extraction, background removal, and rendering all happen in your browser
-via `<video>`, `<canvas>`, Three.js/WebGL, and (for background removal) local
-ML inference over ONNX Runtime Web.
+frame extraction, background removal (chroma key), and rendering all happen
+in your browser via `<video>`, `<canvas>`, and Three.js/WebGL.
 
 ## Running it locally
 
@@ -47,45 +46,51 @@ instead of a pre-keyed source.
   instant, which a single video doesn't provide) — just a different, more
   "particulate" look that stays visible even from a glancing/edge-on camera
   angle, where a flat plane would vanish to a hairline.
-  - **Point spacing** — sample every Nth pixel as a point. Lower = denser and
-    more solid-looking (more points, slower); higher = sparser and more
-    particle-like (fewer points, faster).
-- **Remove background** — separates the subject from the background *before*
-  the block is built, in its own preview window (see below), so the block only
-  contains the moving subject instead of a busy or cluttered backdrop.
-  - **Model** — three interchangeable ways to produce the mask:
-    - *Selfie / person* — MediaPipe's selfie segmenter. Fast, tuned
-      specifically for real human portraits/selfies.
-    - *General subject (ISNet)* — [@imgly/background-removal](https://github.com/imgly/background-removal-js),
-      a class-agnostic salient-object segmenter (the same family behind most
-      "remove.bg"-style tools). Slower, but not limited to photographic
-      people — works on objects, animals, illustrated characters, etc.
-    - *Green screen (chroma key)* — plain color-distance thresholding against
-      a picked key color. Instant, deterministic, no ML model — but only
-      works if the subject was actually filmed against a plain, evenly-lit
-      green/blue backdrop. Exposes its own **Key color** picker and
-      **Tolerance** slider.
+  - **Point spacing** (shown once this is on) — sample every Nth pixel as a
+    point. Lower = denser and more solid-looking (more points, slower);
+    higher = sparser and more particle-like (fewer points, faster).
+- **Remove background** — keys out a plain, evenly-lit green/blue backdrop
+  (chroma key — deterministic color-distance thresholding, no ML model)
+  *before* the block is built, in its own preview window (see below), so the
+  block only contains the moving subject instead of a busy or cluttered
+  backdrop. Exposes its own **Key color** picker, **Tolerance** slider, and
+  **Background video** upload once checked.
+  - **Background video** (optional) — a second video to composite the subject
+    over instead of removing the original background.
   - The **Remove Background** window that opens after clicking Build block
-    runs the mask computation once (with its own progress bar), then lets you
-    preview and adjust a **Background opacity** slider live against a sample
-    frame — 0 fades the background out completely, 1 restores it fully —
-    before baking the chosen value into every frame and building the object.
-    **Skip** builds without any of it.
+    runs the mask computation once (with its own progress bar), then shows a
+    fixed-opacity preview to sanity-check the mask before building. The real,
+    live-adjustable background fade controls (**Background opacity** /
+    **Background ghost opacity**) live in the View panel once the block
+    exists — nothing is baked in at build time. **Skip** builds without any
+    of it.
 - **Build block** — extracts frames (and, if enabled, removes the background)
   and constructs the 3D volume. Shows a progress bar while it works.
 
 ### View
 - **Depth** — spacing between frames along the time axis. Compress it into a
   thin fan or stretch it into a long block.
-- **Ghost opacity** — how transparent "elapsed" frames are (see *Now*, below).
-- **Now** (0–1) — the scrub point. Frames before it are elapsed and render
+- **Ghost opacity** — how transparent "elapsed" frames are (see *Elapsed*, below).
+- **Elapsed** (0–1) — the scrub point. Frames before it are elapsed and render
   ghosted at *Ghost opacity*; frames from it onward haven't elapsed yet and
   render fully solid. This is what actually drives the "block of time" effect.
-  - **Autoplay** — loops *Now* from 0 to 1 automatically (6s per loop).
-    Stops itself the moment you touch the Now slider/field directly.
+  - **Autoplay** — loops *Elapsed* from 0 to 1 automatically (6s per loop).
+    Stops itself the moment you touch the Elapsed slider/field directly.
   - **Ghost all but current frame** — swaps the before/after split for a
-    single-frame "spotlight": only the exact frame at *Now* stays solid,
+    single-frame "spotlight": only the exact frame at *Elapsed* stays solid,
     everything else (past *or* future) ghosts.
+- **Background opacity** / **Background ghost opacity** (shown once a
+  Background video is set under Remove background in Build) — live and
+  adjustable any time, no rebuild needed. *Background opacity* is a
+  multiplier on the replacement video's visibility for frames that haven't
+  played yet, and the current frame. *Background ghost opacity* is the same
+  multiplier for frames that have already played, further multiplied by that
+  frame's own *Ghost opacity* — so a low Ghost opacity fades played frames'
+  backgrounds even further (e.g. 0.25 background × 0.2 ghost = 0.05).
+  - **Background video only on current frame** — instead of the before/after
+    split above, only the frame(s) right around *Elapsed* show the replacement
+    video, crossfading smoothly as it moves (*Background ghost opacity*
+    doesn't apply in this mode).
 - **Solid sides (fill to next frame)** — extrudes each frame into a real box
   that touches its neighbors, so the block has no gaps from any viewing angle.
   Off by default (thin/fanned look); automatically forced on when *Enable
@@ -104,7 +109,7 @@ instead of a pre-keyed source.
 - **Reset camera** — reframes the camera to fit the current block.
 
 ### Slice
-An independent cutaway tool — its own position and angle, unrelated to *Now*.
+An independent cutaway tool — its own position and angle, unrelated to *Elapsed*.
 - **Position** — where the cut plane sits, from one side of the volume to the
   other (the range auto-adjusts to whatever the current tilt actually spans).
 - **Cut angle X / Y** — tilts the cut plane.
@@ -153,10 +158,9 @@ git push origin main
 
 The URL is `https://bbb-ryan.github.io/time-block/` (check **Settings →
 Pages** in the GitHub repo for the exact URL and deployment status). No
-server-side code or environment variables are needed: everything the app
-depends on (Three.js, the ML background-removal models, ONNX Runtime Web)
-loads from public CDNs via the import map in `index.html`, exactly like it
-does locally.
+server-side code or environment variables are needed: Three.js is the only
+dependency, loaded from a public CDN via the import map in `index.html`,
+exactly like it does locally.
 
 ### Anywhere else
 

@@ -10,11 +10,7 @@
 {
   "imports": {
     "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
-    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/",
-    "@mediapipe/tasks-vision": "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@1.0.1/vision_bundle.mjs",
-    "@imgly/background-removal": "https://cdn.jsdelivr.net/npm/@imgly/background-removal@1.7.0/dist/index.mjs",
-    "onnxruntime-web": "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.21.0/dist/ort.bundle.min.mjs",
-    "onnxruntime-web/webgpu": "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.21.0/dist/ort.webgpu.bundle.min.mjs"
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
   }
 }
 </script>
@@ -59,7 +55,7 @@
             <label for="pointCloudEnabled">Render frames as points</label>
             <span class="help" tabindex="0" data-tip="Each frame becomes a cloud of soft round points sampled from its own pixels, instead of a solid textured plane. Stays visible even edge-on, unlike a flat plane.">?</span>
           </div>
-          <div class="field-row-stacked">
+          <div id="pointDensityControls" class="hidden field-row-stacked">
             <div class="val-row">
               <label for="pointDensityVal">Point spacing (px)</label>
               <input type="number" class="val" id="pointDensityVal" min="1" max="10" step="1" value="4" />
@@ -70,18 +66,7 @@
           <div class="field-row">
             <input type="checkbox" id="bgRemoveEnabled" />
             <label for="bgRemoveEnabled">Remove background</label>
-            <span class="help" tabindex="0" data-tip="Runs ML segmentation to separate subject from background before the block is built, in its own preview window.">?</span>
-          </div>
-          <div class="field-row-stacked">
-            <div class="val-row">
-              <label for="bgModel">Model</label>
-              <span class="help" tabindex="0" data-tip="Selfie: fast, tuned for real people/portraits. General: slower, subject-agnostic (works on objects, animals, illustrated characters). Chroma key: instant, but needs a plain green/blue screen behind the subject.">?</span>
-            </div>
-            <select id="bgModel">
-              <option value="mediapipe">Selfie / person (fast)</option>
-              <option value="imgly">General subject (ISNet)</option>
-              <option value="chromakey">Green screen (chroma key)</option>
-            </select>
+            <span class="help" tabindex="0" data-tip="Keys out a plain green/blue backdrop (chroma key) before the block is built, in its own preview window.">?</span>
           </div>
           <div id="chromaKeyControls" class="hidden field-row-stacked">
             <div class="field-row">
@@ -93,6 +78,14 @@
               <input type="number" class="val" id="chromaToleranceVal" min="1" max="100" step="1" value="35" />
             </div>
             <input type="range" id="chromaTolerance" min="1" max="100" step="1" value="35" />
+          </div>
+          <div id="bgVideoUploadControls" class="hidden field-row-stacked">
+            <div class="field-row">
+              <label for="bgVideoInput">Background video</label>
+              <span class="help" tabindex="0" data-tip="Optional: composite the subject over this video instead of removing the original background.">?</span>
+            </div>
+            <input type="file" id="bgVideoInput" accept="video/*,.mp4,.mov,.webm,.m4v,.avi,.mkv,.ogv" />
+            <p id="bgVideoLabelText" class="hint">No background video chosen.</p>
           </div>
           <div class="field-row">
             <button id="buildBtn" disabled>Build block</button>
@@ -123,9 +116,9 @@
           </div>
           <div class="field-row-stacked">
             <div class="val-row">
-              <label for="nowPosVal">Now</label>
+              <label for="nowPosVal">Elapsed</label>
               <input type="number" class="val" id="nowPosVal" min="0" max="1" step="0.01" value="0" />
-              <span class="help" tabindex="0" data-tip="Scrubs what's elapsed: frames before &quot;Now&quot; are ghosted, frames from &quot;Now&quot; on are solid.">?</span>
+              <span class="help" tabindex="0" data-tip="How far into the clip you're viewing. Frames before this point are elapsed and ghosted; frames from it onward haven't happened yet and render solid.">?</span>
             </div>
             <input type="range" id="nowPos" min="0" max="1" step="0.01" value="0" />
           </div>
@@ -138,7 +131,31 @@
           <div class="field-row">
             <input type="checkbox" id="ghostOnlyCurrent" />
             <label for="ghostOnlyCurrent">Ghost all but current frame</label>
-            <span class="help" tabindex="0" data-tip="Instead of a before/after split, only the single frame at &quot;Now&quot; stays solid — everything else, past or future, ghosts.">?</span>
+            <span class="help" tabindex="0" data-tip="Instead of a before/after split, only the single frame at &quot;Elapsed&quot; stays solid — everything else, past or future, ghosts.">?</span>
+          </div>
+
+          <div id="bgVideoOpacityControls" class="hidden field-row-stacked">
+            <div class="field-row-stacked">
+              <div class="val-row">
+                <label for="bgOpacityVal">Background opacity</label>
+                <input type="number" class="val" id="bgOpacityVal" min="0" max="1" step="0.01" value="0.15" />
+                <span class="help" tabindex="0" data-tip="A multiplier on the replacement video's visibility for frames that haven't played yet, and the current frame. Live and adjustable any time — no rebuild needed.">?</span>
+              </div>
+              <input type="range" id="bgOpacity" min="0" max="1" step="0.01" value="0.15" />
+            </div>
+            <div class="field-row-stacked">
+              <div class="val-row">
+                <label for="bgGhostOpacityVal">Background ghost opacity</label>
+                <input type="number" class="val" id="bgGhostOpacityVal" min="0" max="1" step="0.01" value="0.05" />
+                <span class="help" tabindex="0" data-tip="Only relevant with &quot;only on current frame&quot; off. A multiplier on the replacement video's visibility for frames that have already played, further multiplied by that frame's own Ghost opacity — so a low Ghost opacity fades played frames' backgrounds even further.">?</span>
+              </div>
+              <input type="range" id="bgGhostOpacity" min="0" max="1" step="0.01" value="0.05" />
+            </div>
+            <div class="field-row">
+              <input type="checkbox" id="bgOnlyCurrent" />
+              <label for="bgOnlyCurrent">Background video only on current frame</label>
+              <span class="help" tabindex="0" data-tip="Off: the replacement video shows on every frame — Background opacity before a frame's moment passes, Background ghost opacity after. On: only the frame(s) right around &quot;Elapsed&quot; show it, crossfading smoothly as it moves rather than snapping on/off (Background ghost opacity doesn't apply in this mode).">?</span>
+            </div>
           </div>
 
           <div class="field-row">
@@ -259,13 +276,7 @@
         </div>
         <div id="bgPreviewWrap" class="hidden field-row-stacked">
           <canvas id="bgPreviewCanvas"></canvas>
-          <div class="field-row-stacked">
-            <div class="val-row">
-              <label for="bgOpacityVal">Background opacity</label>
-              <input type="number" class="val" id="bgOpacityVal" min="0" max="1" step="0.01" value="0.15" />
-            </div>
-            <input type="range" id="bgOpacity" min="0" max="1" step="0.01" value="0.15" />
-          </div>
+          <p class="hint">Preview at a fixed reference opacity — the real, live-adjustable Background opacity control is in the View panel once the block is built.</p>
         </div>
         <div class="field-row">
           <button id="bgConfirmBtn" class="hidden" disabled>Build block</button>
@@ -276,6 +287,7 @@
   </div>
 
   <video id="sourceVideo" muted playsinline preload="auto" style="display:none"></video>
+  <video id="bgSourceVideo" muted playsinline preload="auto" style="display:none"></video>
 
   <script type="module" src="app.js"></script>
 </body>

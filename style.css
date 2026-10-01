@@ -320,6 +320,18 @@ legend .help {
   display: none;
 }
 
+#bgVideoUploadControls.hidden {
+  display: none;
+}
+
+#bgVideoOpacityControls.hidden {
+  display: none;
+}
+
+#pointDensityControls.hidden {
+  display: none;
+}
+
 #chromaKeyControls .field-row {
   align-items: center;
 }
