@@ -1017,14 +1017,35 @@ const BG_ACTIVE_FADE_FRAMES = 1.5;
 //   for free exactly like the original "0.25 background × 0.2 ghost = 0.05"
 //   request, just using Background ghost opacity instead of Background
 //   opacity for the elapsed case.
-function bgTargetOpacityFor(mesh, i, exactIndex, hasVideo, bgOpacity, bgGhostOpacity, onlyCurrent) {
-  if (!hasVideo) return bgOpacity;
+// Every frame's background sits directly behind the next one along the
+// camera's view axis, so for any ray that passes through k overlapping
+// semi-transparent layers, the standard "over" blend compounds their
+// alphas to 1-(1-a)^k — e.g. 20 layers at the Background opacity default
+// of 0.15 compound to ~96% opaque despite each individual layer being
+// mostly see-through, which read as "background isn't removed at all".
+// Solving that formula for the PER-LAYER alpha that reproduces a given
+// TOTAL opacity across n layers — a = 1-(1-total)^(1/n) — keeps the
+// visible result close to what the slider says regardless of frame count.
+// It assumes a ray crosses all n layers (the straight-on view, worst
+// case); an oblique angle crosses fewer and so reads a bit more faded
+// than the slider value, which is the safer direction to be wrong in.
+function compoundCompensatedAlpha(totalOpacity, n) {
+  if (n <= 1) return totalOpacity;
+  const clamped = Math.min(0.999, Math.max(0, totalOpacity));
+  return 1 - Math.pow(1 - clamped, 1 / n);
+}
+
+function bgTargetOpacityFor(mesh, i, exactIndex, hasVideo, bgOpacity, bgGhostOpacity, onlyCurrent, n) {
+  if (!hasVideo) return compoundCompensatedAlpha(bgOpacity, n);
   if (onlyCurrent) {
+    // Only a couple of frames around the current position are ever
+    // non-zero here (BG_ACTIVE_FADE_FRAMES), not all n at once, so there's
+    // nothing to compound — no compensation needed.
     const dist = Math.abs(i - exactIndex);
     return bgOpacity * Math.max(0, 1 - dist / BG_ACTIVE_FADE_FRAMES);
   }
   const elapsed = ghostPlane.distanceToPoint(mesh.position) < 0;
-  return elapsed ? bgGhostOpacity : bgOpacity;
+  return compoundCompensatedAlpha(elapsed ? bgGhostOpacity : bgOpacity, n);
 }
 
 function updateBackgroundCompositing() {
@@ -1038,7 +1059,7 @@ function updateBackgroundCompositing() {
       const u = m.userData && m.userData.bgUniforms;
       if (!u) return;
       const hasVideo = !!u.uBgVideoMap.value;
-      u.uBgTargetOpacity.value = bgTargetOpacityFor(mesh, i, exactIndex, hasVideo, bgOpacity, bgGhostOpacity, onlyCurrent);
+      u.uBgTargetOpacity.value = bgTargetOpacityFor(mesh, i, exactIndex, hasVideo, bgOpacity, bgGhostOpacity, onlyCurrent, n);
     });
   });
   // Slice caps are patched the same way (see updateSliceCaps()) but rebuilt
@@ -1051,7 +1072,7 @@ function updateBackgroundCompositing() {
       if (!u) return;
       const i = mesh.userData.frameIndex;
       const hasVideo = !!u.uBgVideoMap.value;
-      u.uBgTargetOpacity.value = bgTargetOpacityFor(mesh, i, exactIndex, hasVideo, bgOpacity, bgGhostOpacity, onlyCurrent);
+      u.uBgTargetOpacity.value = bgTargetOpacityFor(mesh, i, exactIndex, hasVideo, bgOpacity, bgGhostOpacity, onlyCurrent, n);
     });
   }
 }
