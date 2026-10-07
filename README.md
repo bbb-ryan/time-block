@@ -1,4 +1,4 @@
-# Time Block
+# [Time Block ](https://bbb-ryan.github.io/time-block/)
 
 Turn a video into a solid 3D "block of time" — every sampled frame becomes a real
 slab of geometry stacked along a depth axis, so the block is genuinely solid from
