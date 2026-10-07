@@ -1577,3 +1577,85 @@ exportBtn.addEventListener('click', () => {
   link.href = renderer.domElement.toDataURL('image/png');
   link.click();
 });
+
+// ---------- About window ----------
+// A small wireframe box matching the viewport's outline box, rendered by its
+// own tiny renderer only while the window is open so it costs nothing closed.
+const aboutWindow = document.getElementById('aboutWindow');
+const aboutCanvas = document.getElementById('aboutCanvas');
+let aboutRenderer = null;
+let aboutScene = null;
+let aboutCamera = null;
+let aboutBox = null;
+let aboutRaf = 0;
+
+function initAboutScene() {
+  aboutRenderer = new THREE.WebGLRenderer({ canvas: aboutCanvas, antialias: true });
+  aboutRenderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+  aboutRenderer.setSize(120, 120, false);
+  aboutScene = new THREE.Scene();
+  aboutCamera = new THREE.PerspectiveCamera(40, 1, 0.1, 20);
+  aboutCamera.position.set(0, 0, 5.2);
+  const geo = new THREE.EdgesGeometry(new THREE.BoxGeometry(1.6, 1.6, 1.6));
+  const mat = new THREE.LineBasicMaterial({ color: 0x6ee7ff });
+  aboutBox = new THREE.LineSegments(geo, mat);
+  aboutBox.rotation.x = 0.5;
+  aboutScene.add(aboutBox);
+}
+
+function tickAbout() {
+  aboutBox.rotation.y += 0.012;
+  aboutRenderer.render(aboutScene, aboutCamera);
+  aboutRaf = requestAnimationFrame(tickAbout);
+}
+
+function setAboutOpen(open) {
+  aboutWindow.classList.toggle('hidden', !open);
+  if (open) {
+    if (!aboutRenderer) initAboutScene();
+    if (!aboutRaf) tickAbout();
+  } else if (aboutRaf) {
+    cancelAnimationFrame(aboutRaf);
+    aboutRaf = 0;
+  }
+}
+
+const aboutBtn = document.getElementById('aboutBtn');
+aboutBtn.addEventListener('click', () => setAboutOpen(aboutWindow.classList.contains('hidden')));
+document.getElementById('aboutCloseBtn').addEventListener('click', () => setAboutOpen(false));
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && !aboutWindow.classList.contains('hidden')) setAboutOpen(false);
+});
+
+// Drag the About window by its title bar. It starts centered via a CSS
+// transform; on first drag that's converted to explicit left/top so the
+// position can be moved freely, clamped to stay fully on screen.
+const aboutTitleBar = aboutWindow.querySelector('.title-bar');
+let aboutDrag = null;
+
+aboutTitleBar.addEventListener('pointerdown', (e) => {
+  if (e.target.closest('button')) return;
+  e.preventDefault();
+  const rect = aboutWindow.getBoundingClientRect();
+  aboutWindow.style.transform = 'none';
+  aboutWindow.style.left = `${rect.left}px`;
+  aboutWindow.style.top = `${rect.top}px`;
+  aboutDrag = { dx: e.clientX - rect.left, dy: e.clientY - rect.top };
+  aboutTitleBar.setPointerCapture(e.pointerId);
+});
+
+aboutTitleBar.addEventListener('pointermove', (e) => {
+  if (!aboutDrag) return;
+  const maxX = window.innerWidth - aboutWindow.offsetWidth;
+  const maxY = window.innerHeight - aboutWindow.offsetHeight;
+  aboutWindow.style.left = `${Math.min(maxX, Math.max(0, e.clientX - aboutDrag.dx))}px`;
+  aboutWindow.style.top = `${Math.min(maxY, Math.max(0, e.clientY - aboutDrag.dy))}px`;
+});
+
+const endAboutDrag = () => {
+  aboutDrag = null;
+};
+aboutTitleBar.addEventListener('pointerup', endAboutDrag);
+aboutTitleBar.addEventListener('pointercancel', endAboutDrag);
+
+setAboutOpen(true);

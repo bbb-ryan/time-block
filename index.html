@@ -245,6 +245,7 @@
       <div class="title-bar">
         <div class="title-bar-text">Viewport</div>
         <div class="title-bar-controls">
+          <button aria-label="Help" id="aboutBtn" title="About Time Block"></button>
           <button aria-label="Maximize" id="viewportMaximizeBtn" title="Maximize viewport (collapse sidebar)"></button>
         </div>
       </div>
@@ -279,6 +280,23 @@
         <div class="field-row">
           <button id="bgConfirmBtn" class="hidden" disabled>Build block</button>
           <button id="bgSkipBtn">Skip</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="window hidden" id="aboutWindow" role="dialog" aria-label="About">
+      <div class="title-bar">
+        <div class="title-bar-text">About</div>
+        <div class="title-bar-controls">
+          <button aria-label="Close" id="aboutCloseBtn" title="Close"></button>
+        </div>
+      </div>
+      <div class="window-body" id="aboutBody">
+        <canvas id="aboutCanvas" width="240" height="240"></canvas>
+        <p id="aboutDesc">Turns a short video into a solid 3D block of time.<br />Scrub, slice, and ghost it to visualize time as a physical object.</p>
+        <div class="field-row" id="aboutLinks">
+          <a href="https://github.com/bbb-ryan/time-block" target="_blank" rel="noopener noreferrer">GitHub repo</a>
+          <a href="https://bryanhuang.framer.website/" target="_blank" rel="noopener noreferrer">About me</a>
         </div>
       </div>
     </div>
